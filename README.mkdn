@@ -1,0 +1,43 @@
+# NAME
+
+POE::Component::ElasticSearch::Indexer - POE session to index data to ElasticSearch
+
+# VERSION
+
+version 0.01
+
+# SYNOPSIS
+
+This POE Session is used to index data to an ElasticSearch cluster.
+
+    use POE qw{ Component::ElasticSearch::Indexer };
+
+    my $es_session = POE::Component::ElasticSearch::Indexer->spawn(
+        Alias            => "es",      # Default
+        TransportTimeout => 10,        # Default
+        FlushInterval    => 30,        # Default
+        FlushSize        => 100_000,   # Default
+        Logger           => undef,     # Default
+    );
+
+    # Index the document using the queue for better performance
+    $poe_kernel->post( es => queue => $index_name => $json_data );
+
+    # Index the document directly
+    $poe_kernel->post( es => save => $index_name => $json_data );
+
+# EXPORTS
+
+POE::Component::ElasticSearch::Indexer does not export any symbols.
+
+# AUTHOR
+
+Brad Lhotsky <brad@divisionbyzero.net>
+
+# COPYRIGHT AND LICENSE
+
+This software is Copyright (c) 2012 by Brad Lhotsky.
+
+This is free software, licensed under:
+
+    The (three-clause) BSD License
