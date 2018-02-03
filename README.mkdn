@@ -4,7 +4,7 @@ POE::Component::ElasticSearch::Indexer - POE session to index data to ElasticSea
 
 # VERSION
 
-version 0.01
+version 0.001
 
 # SYNOPSIS
 
@@ -13,22 +13,90 @@ This POE Session is used to index data to an ElasticSearch cluster.
     use POE qw{ Component::ElasticSearch::Indexer };
 
     my $es_session = POE::Component::ElasticSearch::Indexer->spawn(
-        Alias            => "es",      # Default
-        TransportTimeout => 10,        # Default
-        FlushInterval    => 30,        # Default
-        FlushSize        => 100_000,   # Default
-        Logger           => undef,     # Default
+        Alias            => 'es',                    # Default
+        Timeout          => 10,                      # Default
+        FlushInterval    => 30,                      # Default
+        FlushSize        => 1_000,                   # Default
+        LoggingConfig    => undef,                   # Default
+        DefaultIndex     => 'logs-%Y.%m.%d',         # Default
+        DefaultType      => 'log',                   # Default
+        BatchDir         => '/tmp/es_index_backlog', # Default
+        StatsHandler     => undef,                   # Default
+        StatsInterval    => 60,                      # Default
     );
 
     # Index the document using the queue for better performance
-    $poe_kernel->post( es => queue => $index_name => $json_data );
+    $poe_kernel->post( es => queue => $json_data );
 
-    # Index the document directly
-    $poe_kernel->post( es => save => $index_name => $json_data );
+# DESCRIPTION
 
-# EXPORTS
+This module exists to provide event-based Perl programs with a simple way to
+index documents into an ElasticSearch cluster.
 
-POE::Component::ElasticSearch::Indexer does not export any symbols.
+## spawn()
+
+This method spawns the ElasticSearch indexing [POE::Session](https://metacpan.org/pod/POE::Session). It accepts the
+following parameters.
+
+- **Alias**
+
+    The alias this session is available to other sessions as.  The default is
+    **es**.
+
+- **LoggingConfig**
+
+    The [Log::Log4perl](https://metacpan.org/pod/Log::Log4perl) configuration file for the indexer to use.  Defaults to
+    writing logs to the current directory into the file `es_indexing.log`.
+
+- **Timeout**
+
+    Number of seconds for the HTTP transport connect and transport timeouts.
+    Defaults to **10** seconds.
+
+- **FlushInterval**
+
+    Maximum number of seconds which can pass before a flush of the queue is
+    attempted.  Defaults to **30** seconds.
+
+- **FlushSize**
+
+    Once this number of documents is reached, flush the queue regardless of time
+    since the last flush.  Defaults to **1,000**.
+
+- **DefaultIndex**
+
+    A `strftime` aware index pattern to use if the document is missing an
+    `_index` element.  Defaults to **logs-%Y.%m.%d**.
+
+- **DefaultType**
+
+    Use this `_type` attribute if the document is missing one.  Defaults to
+    **log**.
+
+- **BatchDir**
+
+    If the cluster responds with an HTTP failure code, the batch is written to disk
+    in this directory to be indexed when the cluster is available again.  Defaults
+    to `/tmp/es_index_backlog`.
+
+- **StatsHandler**
+
+    A code reference that will be passed a hash reference containing the keys and
+    values of counters tracked by this component.  Defaults to `undef`, meaning no
+    code is run.
+
+- **StatsInterval**
+
+    Run the `StatsHandler` every `StatsInterval` seconds.  Default to **60**.
+
+## EVENTS
+
+The events provided by this component.
+
+- **queue**
+
+    Takes an array reference of hash references to be transformed into JSON
+    documents and submitted to the cluster's `_bulk` API.
 
 # AUTHOR
 
@@ -36,8 +104,32 @@ Brad Lhotsky <brad@divisionbyzero.net>
 
 # COPYRIGHT AND LICENSE
 
-This software is Copyright (c) 2012 by Brad Lhotsky.
+This software is Copyright (c) 2018 by Brad Lhotsky.
 
 This is free software, licensed under:
 
     The (three-clause) BSD License
+
+# SUPPORT
+
+## Websites
+
+The following websites have more information about this module, and may be of help to you. As always,
+in addition to those websites please use your favorite search engine to discover more resources.
+
+- MetaCPAN
+
+    A modern, open-source CPAN search engine, useful to view POD in HTML format.
+
+    [http://metacpan.org/release/POE-Component-ElasticSearch-Indexer](http://metacpan.org/release/POE-Component-ElasticSearch-Indexer)
+
+- RT: CPAN's Bug Tracker
+
+    The RT ( Request Tracker ) website is the default bug/issue tracking system for CPAN.
+
+    [https://rt.cpan.org/Public/Dist/Display.html?Name=POE-Component-ElasticSearch-Indexer](https://rt.cpan.org/Public/Dist/Display.html?Name=POE-Component-ElasticSearch-Indexer)
+
+## Source Code
+
+This module's source code is available by visiting:
+[https://github.com/reyjrar/POE-Component-ElasticSearch-Indexer](https://github.com/reyjrar/POE-Component-ElasticSearch-Indexer)
