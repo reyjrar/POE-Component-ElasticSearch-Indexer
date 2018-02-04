@@ -111,18 +111,6 @@ Run the C<StatsHandler> every C<StatsInterval> seconds.  Default to B<60>.
 
 =back
 
-=head2 EVENTS
-
-The events provided by this component.
-
-=over 2
-
-=item B<queue>
-
-Takes an array reference of hash references to be transformed into JSON
-documents and submitted to the cluster's C<_bulk> API.
-
-=back
 
 =cut
 
@@ -159,14 +147,13 @@ sub spawn {
     # Management Session
     POE::Session->create(
         inline_states => {
-            _start    => \&es_start,
-            _child    => \&es_child,
-            stats     => \&es_stats,
+            _start    => \&_start,
+            _child    => \&_child,
+            stats     => \&_stats,
             queue     => \&es_queue,
             flush     => \&es_flush,
             batch     => \&es_batch,
             backlog   => \&es_backlog,
-            callback  => \&es_callback,
             http_resp => \&http_resp,
         },
         heap => {
@@ -200,7 +187,8 @@ sub spawn {
 
 #------------------------------------------------------------------------#
 # ES Functions
-sub es_start {
+
+sub _start {
     my ($kernel,$heap) = @_[KERNEL,HEAP];
 
     # Set our alias
@@ -215,7 +203,7 @@ sub es_start {
     path($heap->{cfg}{BatchDir})->mkpath;
 
     # Run through the backlog
-    $kernel->delay_add(backlog => 2);
+    $kernel->delay( backlog => 2 );
     $heap->{backlog_scheduled} = 1;
 
     # Start the queue flushing
@@ -223,12 +211,12 @@ sub es_start {
     $kernel->delay( flush => $heap->{cfg}{FlushInterval} );
 }
 
-sub es_child {
+sub _child {
     my ($kernel,$heap,$reason,$child) = @_[KERNEL,HEAP,ARG0,ARG1];
     INFO(sprintf "child(%s) signal: %s", $child->ID, $reason);
 }
 
-sub es_stats {
+sub _stats {
     my ($kernel,$heap) = @_[KERNEL,HEAP,ARG0,ARG1];
 
     # Reschedule
@@ -256,6 +244,106 @@ sub es_stats {
                              : 'Nothing to report.'
     );
 }
+
+=head2 EVENTS
+
+The events provided by this component.
+
+=over 2
+
+=item B<queue>
+
+Takes an array reference of hash references to be transformed into JSON
+documents and submitted to the cluster's C<_bulk> API.
+
+Example use case:
+
+    sub syslog_handle_line {
+        my ($kernel,$heap,$session,$line) = @_[KERNEL,HEAP,SESSION,ARG0];
+
+        # Create a document from syslog data
+        local $Parse::Syslog::Line::PruneRaw = 1;
+        local $Parse::Syslog::Line::PruneEmpty = 1;
+        my $evt = parse_syslog_line($line);
+
+        # Override the type
+        $evt->{_type} = 'syslog';
+
+        # If we want to collect this event into an auth index:
+        if( exists $Authentication{$evt->{program}} ) {
+            $evt->{_index} = strftime('authentication-%Y.%m.%d',
+                    localtime($evt->{epoch} || time)
+            );
+        }
+        else {
+            # Set an _epoch for the es queue DefaultIndex
+            $evt->{_epoch} = $evt->{epoch} ? delete $evt->{epoch} : time;
+        }
+        # You'll want to batch these in your processor to avoid excess
+        # overhead creating so many events in the POE loop
+        push @{ $heap->{batch} }, $evt;
+
+        # Once we hit 10 messages, force the flush
+        $kernel->call( $session->ID => 'submit_batch') if @{ $heap->{batch} } > 10;
+    }
+
+	sub submit_batch {
+		my ($kernel,$heap) = @_[KERNEL,HEAP];
+
+        # Reset the batch scheduler
+        $kernel->delay( 'submit_batch' => 10 );
+
+        $kernel->post( es => queue => delete $heap->{batch} );
+        $heap->{batch} = [];
+    }
+
+=for Pod::Coverage es_queue
+
+=cut
+
+sub es_queue {
+    my ($kernel,$heap,$data) = @_[KERNEL,HEAP,ARG0];
+
+    return unless $data && is_ref($data);
+
+    my $events = is_arrayref($data) ? $data : [$data];
+    foreach my $doc ( @{ $events } ) {
+        # Assemble Metadata
+        my $epoch = $doc->{_epoch} ? delete $doc->{_epoch} : time;
+        my %meta = (
+            _index => $doc->{_index} ? delete $doc->{_index} : strftime($heap->{cfg}{DefaultIndex},localtime($epoch)),
+            _type  => $doc->{_type}  ? delete $doc->{_type}  : $heap->{cfg}{DefaultType},
+            $doc->{_id} ? ( _id => delete $doc->{_id} ) : (),
+        );
+        $heap->{queue} = [] unless exists $heap->{queue};
+        push @{ $heap->{queue} },
+            join("\n",
+                encode_json({ index => \%meta }),
+                encode_json($doc)
+            );
+    }
+
+    my $queue_size = scalar(@{ $heap->{queue} });
+    if ( exists $heap->{cfg}{FlushSize} && $heap->{cfg}{FlushSize} > 0
+            && $queue_size >= $heap->{cfg}{FlushSize}
+            && !exists $heap->{force_flush}
+    ) {
+        DEBUG("Queue size target exceeded, flushing queue ". $heap->{cfg}{FlushSize} . " max, size is $queue_size" );
+        $heap->{force_flush} = 1;
+        $heap->{flush_requested} = time;
+        $kernel->yield( 'flush' );
+    }
+}
+
+=item B<flush>
+
+Schedule a flush of the existing bulk updates to the cluster.  It should never
+be necessary to call this event unless you'd like to shutdown the event loop
+faster.
+
+=for Pod::Coverage es_flush
+
+=cut
 
 sub es_flush {
     my ($kernel,$heap) = @_[KERNEL,HEAP];
@@ -294,6 +382,40 @@ sub es_flush {
     $heap->{flush_requested} = time + $heap->{cfg}{FlushInterval};
     $kernel->delay( flush => $heap->{cfg}{FlushInterval} );
 }
+
+=item B<backlog>
+
+Request the disk-based backlog be processed.  You should never need to call
+this event as the session will run it once it starts and if there's  data to
+process, it will continue rescheduling as needed.  When a bulk operation fails
+resulting in a batch file, this event is scheduled to run again.
+
+=for Pod::Coverage es_backlog
+
+=cut
+
+sub es_backlog {
+    my ($kernel,$heap) = @_[KERNEL,HEAP];
+
+    delete $heap->{backlog_scheduled};
+
+    my $max_batches = 25;
+    my $batch_dir = path($heap->{cfg}{BatchDir});
+
+    # randomize
+    my @ids = shuffle map { $_->basename('.batch') }
+                $batch_dir->children( qr/\.batch$/ );
+    $kernel->yield( batch => $_ ) for @ids[0..$max_batches-1];
+
+    if(@ids > $max_batches) {
+        $kernel->delay( backlog => 15 );
+        $heap->{backlog_scheduled} = 1;
+    }
+}
+
+=for Pod::Coverage es_batch
+
+=cut
 
 sub es_batch {
     my  ($kernel,$heap,$id) = @_[KERNEL,HEAP,ARG0];
@@ -349,6 +471,12 @@ sub es_batch {
     $heap->{stats}{http_req} ||= 0;
     $heap->{stats}{http_req}++;
 }
+
+=back
+
+=for Pod::Coverage http_resp
+
+=cut
 
 sub http_resp {
     my ($kernel,$heap,$params,$resp) = @_[KERNEL,HEAP,ARG0,ARG1];
@@ -422,63 +550,14 @@ sub http_resp {
     unlock_batch_file($batch_file,$batch_created);
 }
 
-# Process the most recent backlog entries
-sub es_backlog {
-    my ($kernel,$heap) = @_[KERNEL,HEAP];
-
-    delete $heap->{backlog_scheduled};
-
-    my $max_batches = 25;
-    my $batch_dir = path($heap->{cfg}{BatchDir});
-
-    # randomize
-    my @ids = shuffle map { $_->basename('.batch') }
-                $batch_dir->children( qr/\.batch$/ );
-    $kernel->yield( batch => $_ ) for @ids[0..$max_batches-1];
-
-    if(@ids > $max_batches) {
-        $kernel->delay( backlog => 15 );
-        $heap->{backlog_scheduled} = 1;
-    }
-}
-
-sub es_queue {
-    my ($kernel,$heap,$data) = @_[KERNEL,HEAP,ARG0];
-
-    return unless $data && is_ref($data);
-
-    my $events = is_arrayref($data) ? $data : [$data];
-    foreach my $doc ( @{ $events } ) {
-        # Assemble Metadata
-        my $epoch = $doc->{_epoch} ? delete $doc->{_epoch} : time;
-        my %meta = (
-            _index => $doc->{_index} ? delete $doc->{_index} : strftime($heap->{cfg}{DefaultIndex},localtime($epoch)),
-            _type  => $doc->{_type}  ? delete $doc->{_type}  : $heap->{cfg}{DefaultType},
-            $doc->{_id} ? ( _id => delete $doc->{_id} ) : (),
-        );
-        $heap->{queue} = [] unless exists $heap->{queue};
-        push @{ $heap->{queue} },
-            join("\n",
-                encode_json({ index => \%meta }),
-                encode_json($doc)
-            );
-    }
-
-    my $queue_size = scalar(@{ $heap->{queue} });
-    if ( exists $heap->{cfg}{FlushSize} && $heap->{cfg}{FlushSize} > 0
-            && $queue_size >= $heap->{cfg}{FlushSize}
-            && !exists $heap->{force_flush}
-    ) {
-        DEBUG("Queue size target exceeded, flushing queue ". $heap->{cfg}{FlushSize} . " max, size is $queue_size" );
-        $heap->{force_flush} = 1;
-        $heap->{flush_requested} = time;
-        $kernel->yield( 'flush' );
-    }
-}
-
 # Closure for Locks
 {
     my %_lock = ();
+
+=for Pod::Coverage lock_batch_file
+
+=cut
+
     sub lock_batch_file {
         my $batch_file = shift;
         my $lock_file = path($batch_file->absolute . '.lock');
@@ -499,6 +578,11 @@ sub es_queue {
         }
         return $locked;
     }
+
+=for Pod::Coverage unlock_batch_file
+
+=cut
+
     sub unlock_batch_file {
         my $batch_file = shift;
         my $batch_created = shift || 0;
@@ -520,8 +604,6 @@ sub es_queue {
         }
     }
 }
-1;
-
 
 # Return True
 1;

@@ -98,6 +98,60 @@ The events provided by this component.
     Takes an array reference of hash references to be transformed into JSON
     documents and submitted to the cluster's `_bulk` API.
 
+    Example use case:
+
+        sub syslog_handle_line {
+            my ($kernel,$heap,$session,$line) = @_[KERNEL,HEAP,SESSION,ARG0];
+
+            # Create a document from syslog data
+            local $Parse::Syslog::Line::PruneRaw = 1;
+            local $Parse::Syslog::Line::PruneEmpty = 1;
+            my $evt = parse_syslog_line($line);
+
+            # Override the type
+            $evt->{_type} = 'syslog';
+
+            # If we want to collect this event into an auth index:
+            if( exists $Authentication{$evt->{program}} ) {
+                $evt->{_index} = strftime('authentication-%Y.%m.%d',
+                        localtime($evt->{epoch} || time)
+                );
+            }
+            else {
+                # Set an _epoch for the es queue DefaultIndex
+                $evt->{_epoch} = $evt->{epoch} ? delete $evt->{epoch} : time;
+            }
+            # You'll want to batch these in your processor to avoid excess
+            # overhead creating so many events in the POE loop
+            push @{ $heap->{batch} }, $evt;
+
+            # Once we hit 10 messages, force the flush
+            $kernel->call( $session->ID => 'submit_batch') if @{ $heap->{batch} } > 10;
+        }
+
+            sub submit_batch {
+                    my ($kernel,$heap) = @_[KERNEL,HEAP];
+
+            # Reset the batch scheduler
+            $kernel->delay( 'submit_batch' => 10 );
+
+            $kernel->post( es => queue => delete $heap->{batch} );
+            $heap->{batch} = [];
+        }
+
+- **flush**
+
+    Schedule a flush of the existing bulk updates to the cluster.  It should never
+    be necessary to call this event unless you'd like to shutdown the event loop
+    faster.
+
+- **backlog**
+
+    Request the disk-based backlog be processed.  You should never need to call
+    this event as the session will run it once it starts and if there's  data to
+    process, it will continue rescheduling as needed.  When a bulk operation fails
+    resulting in a batch file, this event is scheduled to run again.
+
 # AUTHOR
 
 Brad Lhotsky <brad@divisionbyzero.net>
