@@ -21,6 +21,7 @@ use URI;
 
 use POE qw(
     Component::Client::HTTP
+    Component::Client::Keepalive
 );
 
 =head1 SYNOPSIS
