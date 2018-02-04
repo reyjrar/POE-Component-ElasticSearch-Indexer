@@ -287,8 +287,8 @@ Example use case:
         $kernel->call( $session->ID => 'submit_batch') if @{ $heap->{batch} } > 10;
     }
 
-	sub submit_batch {
-		my ($kernel,$heap) = @_[KERNEL,HEAP];
+    sub submit_batch {
+        my ($kernel,$heap) = @_[KERNEL,HEAP];
 
         # Reset the batch scheduler
         $kernel->delay( 'submit_batch' => 10 );
