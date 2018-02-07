@@ -257,6 +257,10 @@ The events provided by this component.
 Takes an array reference of hash references to be transformed into JSON
 documents and submitted to the cluster's C<_bulk> API.
 
+Alternatively, you can provide an array reference containg blessed objects that
+provide an C<as_bulk()> method.  The result of that method will be added to the
+bulk queue.
+
 Example use case:
 
     sub syslog_handle_line {
@@ -309,19 +313,27 @@ sub es_queue {
 
     my $events = is_arrayref($data) ? $data : [$data];
     foreach my $doc ( @{ $events } ) {
-        # Assemble Metadata
-        my $epoch = $doc->{_epoch} ? delete $doc->{_epoch} : time;
-        my %meta = (
-            _index => $doc->{_index} ? delete $doc->{_index} : strftime($heap->{cfg}{DefaultIndex},localtime($epoch)),
-            _type  => $doc->{_type}  ? delete $doc->{_type}  : $heap->{cfg}{DefaultType},
-            $doc->{_id} ? ( _id => delete $doc->{_id} ) : (),
-        );
-        $heap->{queue} = [] unless exists $heap->{queue};
-        push @{ $heap->{queue} },
-            join("\n",
+        my $record;
+        if( is_blessed_ref($doc) ) {
+            eval {
+                $record = $doc->as_bulk();
+            };
+        }
+        if( !$record ) {
+            # Assemble Metadata
+            my $epoch = $doc->{_epoch} ? delete $doc->{_epoch} : time;
+            my %meta = (
+                _index => $doc->{_index} ? delete $doc->{_index} : strftime($heap->{cfg}{DefaultIndex},localtime($epoch)),
+                _type  => $doc->{_type}  ? delete $doc->{_type}  : $heap->{cfg}{DefaultType},
+                $doc->{_id} ? ( _id => delete $doc->{_id} ) : (),
+            );
+            $record = join('', map { "$_\n" }
                 encode_json({ index => \%meta }),
                 encode_json($doc)
             );
+        }
+        $heap->{queue} = [] unless exists $heap->{queue};
+        push @{ $heap->{queue} }, $record;
     }
 
     my $queue_size = scalar(@{ $heap->{queue} });
@@ -364,7 +376,7 @@ sub es_flush {
 
         # Build the batch
         my $docs = delete $heap->{queue};
-        my $batch = join '', map { sprintf "%s\n", $_; } @{ $docs };
+        my $batch = join '', @{ $docs };
         my $id    = sha1_hex($batch);
         DEBUG(sprintf "Storing to Heap Batch[%s] as %d bytes.", $id, length $batch );
         $heap->{batch}{$id} = $batch;
