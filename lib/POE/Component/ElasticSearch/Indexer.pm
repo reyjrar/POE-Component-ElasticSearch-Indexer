@@ -136,7 +136,7 @@ sub spawn {
     # Setup Logging
     my $loggingConfig = exists $params{LoggingConfig} && -f $params{LoggingConfig} ? $params{LoggingConfig}
                       : \q{
-                            log4perl.logger = INFO, Sync
+                            log4perl.logger = DEBUG, Sync
                             log4perl.appender.File = Log::Log4perl::Appender::File
                             log4perl.appender.File.layout   = PatternLayout
                             log4perl.appender.File.layout.ConversionPattern = %d [%P] %p - %m%n
@@ -213,7 +213,7 @@ sub spawn {
         ConnectionManager => $pool,
         Timeout           => $CONFIG{Timeout} + 1,   # Give ES 1 second to transit
     );
-    INFO(sprintf "Spawned an HTTP Pool for %d servers: %d max connections, %d max per host.",
+    DEBUG(sprintf "Spawned an HTTP Pool for %d servers: %d max connections, %d max per host.",
         $num_servers, $num_open, $num_per_host
     );
     return;
@@ -241,13 +241,12 @@ sub _start {
     $heap->{backlog_scheduled} = 1;
 
     # Start the queue flushing
-    $heap->{flush_requested} = time + $heap->{cfg}{flush_interval};
     $kernel->delay( flush => $heap->{cfg}{FlushInterval} );
 }
 
 sub _child {
     my ($kernel,$heap,$reason,$child) = @_[KERNEL,HEAP,ARG0,ARG1];
-    INFO(sprintf "child(%s) event: %s", $child->ID, $reason);
+    DEBUG(sprintf "child(%s) event: %s", $child->ID, $reason);
 }
 
 sub _stats {
@@ -272,8 +271,8 @@ sub _stats {
             $heap->{stats}{StatsHandler} = undef;
         };
     }
-    # Also output at DEBUG level
-    DEBUG( "STATS - " .
+    # Also output at TRACE level
+    INFO( "STATS - " .
         scalar(keys %$stats) ? join(', ', map { "$_=$stats->{$_}" } sort keys %$stats )
                              : 'Nothing to report.'
     );
@@ -374,10 +373,12 @@ sub es_queue {
             && $queue_size >= $heap->{cfg}{FlushSize}
             && !exists $heap->{force_flush}
     ) {
-        DEBUG("Queue size target exceeded, flushing queue ". $heap->{cfg}{FlushSize} . " max, size is $queue_size" );
+        TRACE("Queue size target exceeded, flushing queue ". $heap->{cfg}{FlushSize} . " max, size is $queue_size" );
         $heap->{force_flush} = 1;
-        $heap->{flush_requested} = time;
         $kernel->yield( 'flush' );
+    }
+    elsif( !$heap->{flushing} ) {
+        $kernel->delay( flush => $heap->{FlushInterval} );
     }
 }
 
@@ -398,35 +399,35 @@ sub es_flush {
     $kernel->delay('flush');
 
     my $count_docs = exists $heap->{queue} && is_arrayref($heap->{queue}) ? scalar(@{ $heap->{queue} }) : 0;
+    my $reason     = exists $heap->{force_flush} && delete $heap->{force_flush} ? 'force' : 'schedule';
 
     if( $count_docs > 0 ) {
-        INFO(sprintf "es_flush(%0.3fs by %s) of %d documents, HTTP pool queued %d requests.",
-            time - $heap->{flush_requested},
-            exists $heap->{force_flush} ? 'force' : 'schedule',
+        my $pending = $kernel->call( http => 'pending_requests_count' );
+        DEBUG(sprintf "es_flush(%s) of %d documents, HTTP pool queued %d requests.",
+            $reason,
             $count_docs,
-            $kernel->call( http => 'pending_requests_count' ),
+            $pending,
         );
+        $heap->{stats}{http_pending_reqs} ||= 0;
+        $heap->{stats}{http_pending_reqs} += $pending;
 
         # Build the batch
         my $docs = delete $heap->{queue};
         my $batch = join '', @{ $docs };
         my $id    = sha1_hex($batch);
-        DEBUG(sprintf "Storing to Heap Batch[%s] as %d bytes.", $id, length $batch );
+        TRACE(sprintf "Storing to Heap Batch[%s] as %d bytes.", $id, length $batch );
         $heap->{batch}{$id} = $batch;
 
         # Send it along
         $kernel->yield( batch => $id );
+
+        # Reschedule our run
+        $kernel->delay( flush => $heap->{cfg}{FlushInterval} );
+        $heap->{flushing} = 1;
     }
     else {
-        DEBUG(sprintf "es_flush() called by %s without any items.",
-            exists $heap->{force_flush} ? 'force' : 'schedule',
-        );
+        TRACE("es_flush() called by $reason without any items, by passing reschedule.");
     }
-
-    # Reschedule
-    delete $heap->{force_flush} if exists $heap->{force_flush};
-    $heap->{flush_requested} = time + $heap->{cfg}{FlushInterval};
-    $kernel->delay( flush => $heap->{cfg}{FlushInterval} );
 }
 
 =item B<backlog>
@@ -494,7 +495,8 @@ sub es_batch {
                 $batch = $batch_file->slurp_raw;
                 my $lines = $batch =~ tr/\n//;
                 if( $lines > 0 ) {
-                    $kernel->yield(callback => consumed => int( $lines / 2 ));
+                    $heap->{stats}{consumed} ||= 0;
+                    $heap->{stats}{consumed} += int($lines / 2);
                 }
             }
         }
@@ -517,7 +519,7 @@ sub es_batch {
     $req->header('Content-Type', 'application/x-ndjson');
     $req->content($batch);
 
-    DEBUG(sprintf "Bulk update of %d bytes being attempted to %s as %s.",
+    TRACE(sprintf "Bulk update of %d bytes being attempted to %s as %s.",
         length($batch),
         $uri->as_string,
         $id,
@@ -545,7 +547,7 @@ sub http_resp {
 
     # We might need to batch things
     my $batch_file = path($heap->{cfg}{BatchDir})->child($id . '.batch');
-    DEBUG(sprintf "http_resp(%s) %s", $id, $r->status_line);
+    TRACE(sprintf "http_resp(%s) %s", $id, $r->status_line);
 
     # Record the responses we receive
     my $resp_key = "http_resp_" . $r->is_success ? 'success' : 'failure';
@@ -559,7 +561,7 @@ sub http_resp {
             $details = decode_json($r->content);
         };
         if( defined $details && ref $details eq 'HASH' ) {
-            INFO(sprintf "es_flush(%s) size was %d bytes for %d items, took %d ms (elapsed:%0.3fs)%s",
+            DEBUG(sprintf "es_flush(%s) size was %d bytes for %d items, took %d ms (elapsed:%0.3fs)%s",
                 $id,
                 length($req->content),
                 scalar(@{$details->{items}}),
@@ -590,7 +592,7 @@ sub http_resp {
         unless( $batch_file->is_file ) {
             my $lines = $req->content =~ tr/\n//;
             my $items = int( $lines / 2 );
-            INFO(sprintf "[%d] Storing to File Batch[%s] as %d bytes, %d items. (elapsed:%0.3fs)",
+            DEBUG(sprintf "[%d] Storing to File Batch[%s] as %d bytes, %d items. (elapsed:%0.3fs)",
                     $r->code, $id, length($req->content), $items, $duration
             );
             $batch_file->spew_raw($req->content);
@@ -620,11 +622,12 @@ sub es_save {
     unless( $batch_file->is_file ) {
         my $lines = $content =~ tr/\n//;
         my $items = int( $lines / 2 );
-        INFO(sprintf "Storing to File Batch[%s] as %d bytes, %d items. (elapsed:%0.3fs)",
+        DEBUG(sprintf "Storing to File Batch[%s] as %d bytes, %d items. (elapsed:%0.3fs)",
                 $id, length($content), $items, $duration
         );
-        $batch_file->spew_raw($req->content);
-        $batch_created = 1;
+        $batch_file->spew_raw($content);
+        $heap->{stats}{batches} ||= 0;
+        $heap->{stats}{batches}++;
         $heap->{stats}{backlogged} ||= 0;
         $heap->{stats}{backlogged} += $items;
     }
@@ -632,7 +635,6 @@ sub es_save {
         $kernel->delay_add( backlog => 60 );
         $heap->{backlog_scheduled} = 1;
     }
-
 }
 
 # Closure for Locks
@@ -658,7 +660,7 @@ sub es_save {
                 1;
             };
             if(!defined $locked) {
-                DEBUG(sprintf "lock_batch_file(%s) failed: %s", $id, $@);
+                TRACE(sprintf "lock_batch_file(%s) failed: %s", $id, $@);
             }
         }
         return $locked;
@@ -679,7 +681,7 @@ sub es_save {
                 flock($_lock{$id}, LOCK_UN);
                 1;
             } or do {
-                DEBUG(sprintf "unlock_batch_file(%s) failed: %s, removing file anyways.", $id, $@);
+                WARN(sprintf "unlock_batch_file(%s) failed: %s, removing file anyways.", $id, $@);
             };
             close( delete $_lock{$id} );
             $lock_file->remove if $lock_file->is_file;
