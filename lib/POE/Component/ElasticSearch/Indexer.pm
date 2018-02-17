@@ -39,6 +39,7 @@ This POE Session is used to index data to an ElasticSearch cluster.
         DefaultIndex     => 'logs-%Y.%m.%d',         # Default
         DefaultType      => 'log',                   # Default
         BatchDir         => '/tmp/es_index_backlog', # Default
+        BatchDiskSpace   => undef,                   # Default
         StatsHandler     => undef,                   # Default
         StatsInterval    => 60,                      # Default
     );
@@ -99,6 +100,12 @@ B<log>.
 If the cluster responds with an HTTP failure code, the batch is written to disk
 in this directory to be indexed when the cluster is available again.  Defaults
 to C</tmp/es_index_backlog>.
+
+=item B<BatchDiskSpace>
+
+Defaults to undef, which means disk space isn't checked.  If set, if the batch
+size goes over this limit, every new batch saved will delete the oldest batch.
+Checked every ten batches.
 
 =item B<StatsHandler>
 
@@ -174,6 +181,7 @@ sub spawn {
             queue     => \&es_queue,
             flush     => \&es_flush,
             batch     => \&es_batch,
+            save      => \&es_save,
             backlog   => \&es_backlog,
             health    => \&es_health,
 
@@ -188,13 +196,14 @@ sub spawn {
             resp_health        => \&resp_health,
         },
         heap => {
-            cfg   => \%CONFIG,
-            stats => {},
-            start => {},
-            batch => {},
+            cfg      => \%CONFIG,
+            stats    => {},
+            start    => {},
+            batch    => {},
+            health   => '',
+            es_ready => 0,
+            batches  => 0,
             pending_templates => $CONFIG{Templates} || {},
-            health            => '',
-            es_ready          => 0,
         },
     );
 
@@ -239,9 +248,6 @@ sub _start {
     # Run through the backlog
     $kernel->delay( backlog => 2 );
     $heap->{backlog_scheduled} = 1;
-
-    # Start the queue flushing
-    $kernel->delay( flush => $heap->{cfg}{FlushInterval} );
 }
 
 sub _child {
@@ -253,7 +259,8 @@ sub _stats {
     my ($kernel,$heap) = @_[KERNEL,HEAP,ARG0,ARG1];
 
     # Reschedule
-    $kernel->delay( stats => $heap->{cfg}{StatsInterval} );
+    $kernel->delay( stats => $heap->{cfg}{StatsInterval} )
+        unless $heap->{SHUTDOWN};
 
     # Extract the stats from the heap
     my $stats = delete $heap->{stats};
@@ -289,7 +296,7 @@ The events provided by this component.
 Takes an array reference of hash references to be transformed into JSON
 documents and submitted to the cluster's C<_bulk> API.
 
-Alternatively, you can provide an array reference containg blessed objects that
+Alternatively, you can provide an array reference containing blessed objects that
 provide an C<as_bulk()> method.  The result of that method will be added to the
 bulk queue.
 
@@ -378,7 +385,7 @@ sub es_queue {
         $kernel->yield( 'flush' );
     }
     elsif( !$heap->{flushing} ) {
-        $kernel->delay( flush => $heap->{FlushInterval} );
+        $kernel->delay( flush => $heap->{cfg}{FlushInterval} ) unless $heap->{SHUTDOWN};
     }
 }
 
@@ -402,31 +409,27 @@ sub es_flush {
     my $reason     = exists $heap->{force_flush} && delete $heap->{force_flush} ? 'force' : 'schedule';
 
     if( $count_docs > 0 ) {
-        my $pending = $kernel->call( http => 'pending_requests_count' );
-        DEBUG(sprintf "es_flush(%s) of %d documents, HTTP pool queued %d requests.",
-            $reason,
-            $count_docs,
-            $pending,
-        );
-        $heap->{stats}{http_pending_reqs} ||= 0;
-        $heap->{stats}{http_pending_reqs} += $pending;
-
         # Build the batch
+        my $to    = $heap->{es_ready} ? 'batch' : 'save';
         my $docs = delete $heap->{queue};
         my $batch = join '', @{ $docs };
         my $id    = sha1_hex($batch);
-        TRACE(sprintf "Storing to Heap Batch[%s] as %d bytes.", $id, length $batch );
         $heap->{batch}{$id} = $batch;
 
-        # Send it along
-        $kernel->yield( batch => $id );
+        DEBUG(sprintf "es_flush(%s) of %d documents to %s, id=%s",
+            $reason,
+            $count_docs,
+            $to,
+            $id,
+        );
+        $kernel->yield( $to => $id );
 
         # Reschedule our run
-        $kernel->delay( flush => $heap->{cfg}{FlushInterval} );
+        $kernel->delay( flush => $heap->{cfg}{FlushInterval} ) unless $heap->{SHUTDOWN};
         $heap->{flushing} = 1;
     }
     else {
-        TRACE("es_flush() called by $reason without any items, by passing reschedule.");
+        INFO("es_flush($reason) without any docs, bypassing reschedule.");
     }
 }
 
@@ -455,9 +458,22 @@ sub es_backlog {
     $kernel->yield( batch => $_ ) for @ids[0..$max_batches-1];
 
     if(@ids > $max_batches) {
-        $kernel->delay( backlog => 15 );
+        $kernel->delay( backlog => 15 ) unless $heap->{SHUTDOWN};
         $heap->{backlog_scheduled} = 1;
     }
+}
+
+=item B<shutdown>
+
+Inform this session that you'd like to wrap up operations.  This prevents recurring events from being scheduled.
+
+=for Pod::Coverage es_shutdown
+
+=cut
+
+sub es_shutdown {
+    $_[HEAP]->{SHUTDOWN} = 1;
+    FATAL("es_shutdown() - Shutting down.");
 }
 
 =for Pod::Coverage es_batch
@@ -533,11 +549,11 @@ sub es_batch {
 
 =back
 
-=for Pod::Coverage http_resp
+=for Pod::Coverage resp_bulk
 
 =cut
 
-sub http_resp {
+sub resp_bulk {
     my ($kernel,$heap,$params,$resp) = @_[KERNEL,HEAP,ARG0,ARG1];
 
     my $req  = $params->[0];  # HTTP::Request Object
@@ -547,21 +563,20 @@ sub http_resp {
 
     # We might need to batch things
     my $batch_file = path($heap->{cfg}{BatchDir})->child($id . '.batch');
-    TRACE(sprintf "http_resp(%s) %s", $id, $r->status_line);
+    TRACE(sprintf "bulk_resp(%s) %s", $id, $r->status_line);
 
     # Record the responses we receive
-    my $resp_key = "http_resp_" . $r->is_success ? 'success' : 'failure';
+    my $resp_key = "bulk_" . $r->is_success ? 'success' : 'failure';
     $heap->{stats}{$resp_key} ||= 0;
     $heap->{stats}{$resp_key}++;
 
-    my $batch_created = 0;
     if( $r->is_success ) {
         my $details;
         eval {
             $details = decode_json($r->content);
         };
         if( defined $details && ref $details eq 'HASH' ) {
-            DEBUG(sprintf "es_flush(%s) size was %d bytes for %d items, took %d ms (elapsed:%0.3fs)%s",
+            DEBUG(sprintf "bulk_resp(%s) size was %d bytes for %d items, took %d ms (elapsed:%0.3fs)%s",
                 $id,
                 length($req->content),
                 scalar(@{$details->{items}}),
@@ -577,7 +592,7 @@ sub http_resp {
             }
         }
         else {
-            WARN(sprintf "es_flush(%s) size was %d bytes, (elapsed:%0.3fs) but not valid JSON: %s",
+            WARN(sprintf "bulk_resp(%s) size was %d bytes, (elapsed:%0.3fs) but not valid JSON: %s",
                 $id,
                 length($req->content),
                 $duration,
@@ -589,25 +604,15 @@ sub http_resp {
     }
     else {
         # Write batch to disk, unless it exists.
-        unless( $batch_file->is_file ) {
-            my $lines = $req->content =~ tr/\n//;
-            my $items = int( $lines / 2 );
-            DEBUG(sprintf "[%d] Storing to File Batch[%s] as %d bytes, %d items. (elapsed:%0.3fs)",
-                    $r->code, $id, length($req->content), $items, $duration
-            );
-            $batch_file->spew_raw($req->content);
-            $batch_created = 1;
-            $heap->{stats}{backlogged} ||= 0;
-            $heap->{stats}{backlogged} += $items;
-        }
-        unless( exists $heap->{backlog_scheduled} ) {
-            $kernel->delay_add( backlog => 60 );
-            $heap->{backlog_scheduled} = 1;
-        }
+        $kernel->yield( save => $id ) unless $batch_file->is_file;
     }
     # Remove the lock
-    unlock_batch_file($batch_file,$batch_created);
+    unlock_batch_file($batch_file);
 }
+
+=for Pod::Coverage es_save
+
+=cut
 
 sub es_save {
     my ($kernel,$heap,$id) = @_[KERNEL,HEAP,ARG0];
@@ -630,10 +635,74 @@ sub es_save {
         $heap->{stats}{batches}++;
         $heap->{stats}{backlogged} ||= 0;
         $heap->{stats}{backlogged} += $items;
+
+        # Batch Counter
+        $heap->{batches} = ($heap->{batches} % 10 ) + 1;
+        if( $heap->{batches} >= 10 ) {
+            $kernel->yield('cleanup');
+        }
     }
     unless( exists $heap->{backlog_scheduled} ) {
-        $kernel->delay_add( backlog => 60 );
+        $kernel->delay( backlog => 60 ) unless $heap->{SHUTDOWN};
         $heap->{backlog_scheduled} = 1;
+    }
+}
+
+=for Pod::Coverage es_cleanup
+
+=cut
+
+sub es_cleanup {
+    my ($kernel,$heap) = @_[KERNEL,HEAP];
+
+    # Only run if we need to run
+    return unless $heap->{cfg}{BatchDiskSpace};
+
+    my $total = 0;
+    my $batch_dir = path($heap->{cfg}{BatchDir});
+    my @files = ();
+
+    # Check our total size
+    $batch_dir->visit(sub {
+        my $p = shift;
+
+        # Skip unless it's a batch file
+        return unless $p->basename =~ /\.batch$/;
+
+        # Figure out the average size
+        $total += my $size = $p->stat->size;
+        push @files, {
+            path  => $p,
+            size  => $size,
+            ctime => $p->stat->ctime,
+        };
+    });
+
+    # Delete some stuff
+    if( $total > $heap->{cfg}{BatchDiskSpace} ) {
+        # Sort oldest to newest
+        foreach my $batch ( sort { $a->{ctime} <=> $b->{ctime} } @files ) {
+            next unless lock_batch_file($batch->{path});
+            my $state = 'success';
+            eval {
+                # If we fail, it's because something else delete this file
+                $batch->{path}->remove;
+                1;
+            } or do {
+                my $err = $@;
+                TRACE(sprintf "es_cleanup() failed removing %s: %s",
+                    $batch->{path}->absolute->stringify,
+                    $err,
+                );
+                $state = 'fail';
+            };
+            $heap->{stats}{"cleanup_$state"} ||= 0;
+            $heap->{stats}{"cleanup_$state"}++;
+
+            unlock_batch_file($batch->{path});
+            $total -= $batch->{size};
+            last if $total < $heap->{cfg}{BatchDiskSpace};
+        }
     }
 }
 
@@ -672,7 +741,6 @@ sub es_save {
 
     sub unlock_batch_file {
         my $batch_file = shift;
-        my $batch_created = shift || 0;
         my $lock_file = path($batch_file->absolute . '.lock');
         my $id = $lock_file->absolute;
 
@@ -685,9 +753,6 @@ sub es_save {
             };
             close( delete $_lock{$id} );
             $lock_file->remove if $lock_file->is_file;
-        }
-        elsif( !$batch_created && $batch_file->is_file ) {
-            WARN(sprintf "unlock_batch_file(%s) sent invalid unlock request.", $id);
         }
     }
 }
