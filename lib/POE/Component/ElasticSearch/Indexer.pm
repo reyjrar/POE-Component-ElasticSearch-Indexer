@@ -15,7 +15,7 @@ use List::Util qw(shuffle);
 use Log::Log4perl qw(:easy);
 use Path::Tiny;
 use POSIX qw(strftime);
-use Ref::Util qw(is_ref is_arrayref is_hashref is_coderef);
+use Ref::Util qw(is_ref is_arrayref is_blessed_ref is_hashref is_coderef);
 use Time::HiRes qw(time);
 use URI;
 
@@ -110,6 +110,20 @@ code is run.
 
 Run the C<StatsHandler> every C<StatsInterval> seconds.  Default to B<60>.
 
+=item B<Templates>
+
+If configured, this will ensure the L<Dynamic
+Templates|https://www.elastic.co/guide/en/elasticsearch/reference/master/dynamic-templates.html>
+specified exist and are up-to-date with your specifications.
+
+
+    my $idx = POE::Component::ElasticSearch::Indexer->spawn(
+            ...
+            Templates => {
+                base_settings => { template => '*', settings => { 'index.number_of_shards' => 6 } },
+            },
+    );
+
 =back
 
 
@@ -144,6 +158,12 @@ sub spawn {
         BatchDir      => '/tmp/es_index_backlog',
         %params,
     );
+    if( $CONFIG{Templates} ) {
+        if( !is_hashref($CONFIG{Templates}) ) {
+            ERROR("Recieved invalid parameter for 'Templates' parameter, ignoring it entirely.");
+            delete $CONFIG{Templates};
+        }
+    }
 
     # Management Session
     POE::Session->create(
@@ -155,13 +175,26 @@ sub spawn {
             flush     => \&es_flush,
             batch     => \&es_batch,
             backlog   => \&es_backlog,
-            http_resp => \&http_resp,
+            health    => \&es_health,
+
+            # Templates
+            get_templates => \&es_get_templates,
+            put_template  => \&es_put_template,
+
+            # HTTP Responses
+            resp_bulk          => \&resp_bulk,
+            resp_get_templates => \&resp_get_templates,
+            resp_put_template  => \&resp_get_templates,
+            resp_health        => \&resp_health,
         },
         heap => {
             cfg   => \%CONFIG,
             stats => {},
             start => {},
             batch => {},
+            pending_templates => $CONFIG{Templates} || {},
+            health            => '',
+            es_ready          => 0,
         },
     );
 
@@ -214,7 +247,7 @@ sub _start {
 
 sub _child {
     my ($kernel,$heap,$reason,$child) = @_[KERNEL,HEAP,ARG0,ARG1];
-    INFO(sprintf "child(%s) signal: %s", $child->ID, $reason);
+    INFO(sprintf "child(%s) event: %s", $child->ID, $reason);
 }
 
 sub _stats {
@@ -385,7 +418,7 @@ sub es_flush {
         $kernel->yield( batch => $id );
     }
     else {
-        WARN(sprintf "es_flush() called by %s without any items.",
+        DEBUG(sprintf "es_flush() called by %s without any items.",
             exists $heap->{force_flush} ? 'force' : 'schedule',
         );
     }
@@ -434,6 +467,17 @@ sub es_batch {
     my  ($kernel,$heap,$id) = @_[KERNEL,HEAP,ARG0];
 
     return unless defined $id;
+
+    # Only process if we're ready
+    if( !$heap->{es_ready} ) {
+        # Flush this batch to disk
+        $kernel->yield( save => $id )
+            if exists $heap->{batch}{$id};
+
+        # Bail and rely on the disk backlog
+        return;
+    }
+
     # Get our content
     my $batch = '';
     if( exists $heap->{batch}{$id} ) {
@@ -561,6 +605,34 @@ sub http_resp {
     }
     # Remove the lock
     unlock_batch_file($batch_file,$batch_created);
+}
+
+sub es_save {
+    my ($kernel,$heap,$id) = @_[KERNEL,HEAP,ARG0];
+
+    return unless exists $heap->{batch}{$id};
+
+    my $content    = delete $heap->{batch}{$id};
+    my $batch_file = path($heap->{cfg}{BatchDir})->child($id . '.batch');
+    my $duration   = exists $heap->{start}{$id} ? time - $heap->{start}{$id} : 0;
+
+    # Write batch to disk, unless it exists.
+    unless( $batch_file->is_file ) {
+        my $lines = $content =~ tr/\n//;
+        my $items = int( $lines / 2 );
+        INFO(sprintf "Storing to File Batch[%s] as %d bytes, %d items. (elapsed:%0.3fs)",
+                $id, length($content), $items, $duration
+        );
+        $batch_file->spew_raw($req->content);
+        $batch_created = 1;
+        $heap->{stats}{backlogged} ||= 0;
+        $heap->{stats}{backlogged} += $items;
+    }
+    unless( exists $heap->{backlog_scheduled} ) {
+        $kernel->delay_add( backlog => 60 );
+        $heap->{backlog_scheduled} = 1;
+    }
+
 }
 
 # Closure for Locks
