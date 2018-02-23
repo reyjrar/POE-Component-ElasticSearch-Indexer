@@ -260,7 +260,7 @@ sub _start {
     my ($kernel,$heap) = @_[KERNEL,HEAP];
 
     # Set our alias
-    $kernel->alias_set($heap->{Alias});
+    $kernel->alias_set($heap->{cfg}{Alias});
 
     # Set the interval / maximum
     my $adjuster = (1 + (int(rand(10))/20));
