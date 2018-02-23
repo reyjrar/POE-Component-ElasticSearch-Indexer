@@ -208,17 +208,17 @@ sub spawn {
             batch     => \&es_batch,
             save      => \&es_save,
             backlog   => \&es_backlog,
-            health    => \&es_health,
+            #health    => \&es_health,
 
             # Templates
-            get_templates => \&es_get_templates,
-            put_template  => \&es_put_template,
+            #get_templates => \&es_get_templates,
+            #put_template  => \&es_put_template,
 
             # HTTP Responses
             resp_bulk          => \&resp_bulk,
-            resp_get_templates => \&resp_get_templates,
-            resp_put_template  => \&resp_get_templates,
-            resp_health        => \&resp_health,
+            #resp_get_templates => \&resp_get_templates,
+            #resp_put_template  => \&resp_get_templates,
+            #resp_health        => \&resp_health,
         },
         heap => {
             cfg      => \%CONFIG,
@@ -273,6 +273,7 @@ sub _start {
     # Run through the backlog
     $kernel->delay( backlog => 2 );
     $heap->{backlog_scheduled} = 1;
+    $heap->{es_ready} = 1;
 }
 
 sub _child {
