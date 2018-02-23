@@ -616,7 +616,7 @@ sub es_batch {
         $uri->as_string,
         $id,
     );
-    $kernel->post( http => request => http_resp => $req => $id );
+    $kernel->post( http => request => resp_bulk => $req => $id );
     # Record the request
     $heap->{start}{$id} = time unless exists $heap->{start}{$id};
     $heap->{stats}{http_req} ||= 0;
