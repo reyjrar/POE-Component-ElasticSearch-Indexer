@@ -125,10 +125,6 @@ The events provided by this component.
     Takes an array reference of hash references to be transformed into JSON
     documents and submitted to the cluster's `_bulk` API.
 
-    Alternatively, you can provide an array reference containing blessed objects that
-    provide an `as_bulk()` method.  The result of that method will be added to the
-    bulk queue.
-
     Each hash reference may pass in the following special keys, which will be used
     to index the event.  These keys will be deleted from the document being indexed
     as they have special meaning to the `bulk` API.
@@ -155,6 +151,15 @@ The events provided by this component.
         for `strftime` calculations is the current time.
 
     For more information, see the [Elasticsearch Bulk API Docs](https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html).
+
+    Alternatively, you can provide an array reference containing blessed objects that
+    provide an `as_bulk()` method.  The result of that method will be added to the
+    bulk queue.
+
+    If you've decided to construct the requisite newline delimited JSON yourself,
+    you may pass in an array reference containing scalars.  If you do, the module
+    assumes you know what you're doing and will append that text to the existing
+    bulk queue unchanged.
 
     Example use case:
 

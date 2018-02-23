@@ -314,10 +314,6 @@ The events provided by this component.
 Takes an array reference of hash references to be transformed into JSON
 documents and submitted to the cluster's C<_bulk> API.
 
-Alternatively, you can provide an array reference containing blessed objects that
-provide an C<as_bulk()> method.  The result of that method will be added to the
-bulk queue.
-
 Each hash reference may pass in the following special keys, which will be used
 to index the event.  These keys will be deleted from the document being indexed
 as they have special meaning to the C<bulk> API.
@@ -348,6 +344,15 @@ for C<strftime> calculations is the current time.
 =back
 
 For more information, see the L<Elasticsearch Bulk API Docs|https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html>.
+
+Alternatively, you can provide an array reference containing blessed objects that
+provide an C<as_bulk()> method.  The result of that method will be added to the
+bulk queue.
+
+If you've decided to construct the requisite newline delimited JSON yourself,
+you may pass in an array reference containing scalars.  If you do, the module
+assumes you know what you're doing and will append that text to the existing
+bulk queue unchanged.
 
 Example use case:
 
@@ -400,14 +405,19 @@ sub es_queue {
     return unless $data && is_ref($data);
 
     my $events = is_arrayref($data) ? $data : [$data];
-    foreach my $doc ( @{ $events } ) {
+    DOC: foreach my $doc ( @{ $events } ) {
         my $record;
         if( is_blessed_ref($doc) ) {
             eval {
                 $record = $doc->as_bulk();
+                1;
+            } or do {
+                $heap->{stats}{queue_blessed_fail} ||= 0;
+                $heap->{stats}{queue_blessed_fail}++;
+                next DOC;
             };
         }
-        if( !$record ) {
+        elsif( is_hashref($doc) ) {
             # Assemble Metadata
             my $epoch = $doc->{_epoch} ? delete $doc->{_epoch} : time;
             my %meta = (
@@ -415,11 +425,20 @@ sub es_queue {
                 _type  => $doc->{_type}  ? delete $doc->{_type}  : $heap->{cfg}{DefaultType},
                 $doc->{_id} ? ( _id => delete $doc->{_id} ) : (),
             );
-            $record = join('', map { "$_\n" }
+            $record = sprintf("%s\n%s\n",
                 encode_json({ index => \%meta }),
-                encode_json($doc)
+                encode_json($doc),
             );
         }
+        elsif( !is_ref($doc) ) {
+            $record = $doc;
+        }
+        else {
+            $heap->{stats}{queue_bad_input} ||= 0;
+            $heap->{stats}{queue_bad_input}++;
+        }
+        # Ensure we wound up with something useful
+        next unless $record;
         $heap->{queue} = [] unless exists $heap->{queue};
         push @{ $heap->{queue} }, $record;
     }
