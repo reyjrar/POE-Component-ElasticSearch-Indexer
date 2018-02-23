@@ -21,6 +21,7 @@ This POE Session is used to index data to an ElasticSearch cluster.
         DefaultIndex     => 'logs-%Y.%m.%d',         # Default
         DefaultType      => 'log',                   # Default
         BatchDir         => '/tmp/es_index_backlog', # Default
+        BatchDiskSpace   => undef,                   # Default
         StatsHandler     => undef,                   # Default
         StatsInterval    => 60,                      # Default
     );
@@ -79,6 +80,19 @@ following parameters.
     in this directory to be indexed when the cluster is available again.  Defaults
     to `/tmp/es_index_backlog`.
 
+- **BatchDiskSpace**
+
+    Defaults to undef, which means disk space isn't checked.  If set, if the batch
+    size goes over this limit, every new batch saved will delete the oldest batch.
+    Checked every ten batches.
+
+    You may specify either as absolute bytes or using shortcuts:
+
+        BathDiskSpace => 500kb,
+        BathDiskSpace => 100mb,
+        BathDiskSpace => 10gb,
+        BathDiskSpace => 1tb,
+
 - **StatsHandler**
 
     A code reference that will be passed a hash reference containing the keys and
@@ -89,6 +103,19 @@ following parameters.
 
     Run the `StatsHandler` every `StatsInterval` seconds.  Default to **60**.
 
+- **Templates**
+
+    If configured, this will ensure the [Dynamic
+    Templates](https://www.elastic.co/guide/en/elasticsearch/reference/master/dynamic-templates.html)
+    specified exist and are up-to-date with your specifications.
+
+        my $idx = POE::Component::ElasticSearch::Indexer->spawn(
+                ...
+                Templates => {
+                    base_settings => { template => '*', settings => { 'index.number_of_shards' => 6 } },
+                },
+        );
+
 ## EVENTS
 
 The events provided by this component.
@@ -97,6 +124,10 @@ The events provided by this component.
 
     Takes an array reference of hash references to be transformed into JSON
     documents and submitted to the cluster's `_bulk` API.
+
+    Alternatively, you can provide an array reference containing blessed objects that
+    provide an `as_bulk()` method.  The result of that method will be added to the
+    bulk queue.
 
     Example use case:
 
@@ -151,6 +182,10 @@ The events provided by this component.
     this event as the session will run it once it starts and if there's  data to
     process, it will continue rescheduling as needed.  When a bulk operation fails
     resulting in a batch file, this event is scheduled to run again.
+
+- **shutdown**
+
+    Inform this session that you'd like to wrap up operations.  This prevents recurring events from being scheduled.
 
 # AUTHOR
 

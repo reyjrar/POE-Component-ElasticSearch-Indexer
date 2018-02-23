@@ -107,6 +107,13 @@ Defaults to undef, which means disk space isn't checked.  If set, if the batch
 size goes over this limit, every new batch saved will delete the oldest batch.
 Checked every ten batches.
 
+You may specify either as absolute bytes or using shortcuts:
+
+    BathDiskSpace => 500kb,
+    BathDiskSpace => 100mb,
+    BathDiskSpace => 10gb,
+    BathDiskSpace => 1tb,
+
 =item B<StatsHandler>
 
 A code reference that will be passed a hash reference containing the keys and
@@ -169,6 +176,17 @@ sub spawn {
         if( !is_hashref($CONFIG{Templates}) ) {
             ERROR("Recieved invalid parameter for 'Templates' parameter, ignoring it entirely.");
             delete $CONFIG{Templates};
+        }
+    }
+    if( $CONFIG{BatchDiskSpace} ) {
+        # Human Readable to Computer Readable
+        if( my ($size,$unit) = ($CONFIG{BatchDiskSpace} =~ /(\d+(?:\.\d+))\s*([kmgt])b?/i) ) {
+            $unit = lc $unit;
+            $CONFIG{BatchDiskSpace} = $unit eq 'k' ? $size * 1_000
+                                    : $unit eq 'm' ? $size * 1_000_000
+                                    : $unit eq 'g' ? $size * 1_000_000_000
+                                    : $unit eq 't' ? $size * 1_000_000_000_000
+                                    : $size;
         }
     }
 
