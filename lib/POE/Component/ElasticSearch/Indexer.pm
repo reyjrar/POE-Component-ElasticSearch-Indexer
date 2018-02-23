@@ -318,6 +318,37 @@ Alternatively, you can provide an array reference containing blessed objects tha
 provide an C<as_bulk()> method.  The result of that method will be added to the
 bulk queue.
 
+Each hash reference may pass in the following special keys, which will be used
+to index the event.  These keys will be deleted from the document being indexed
+as they have special meaning to the C<bulk> API.
+
+=over 2
+
+=item B<_id>
+
+Will be submitted as the document id in the bulk operation, if not specified,
+Elasticsearch will generate a UUID for each document automatically.
+
+=item B<_type>
+
+Will be submitted as the document type in the bulk operation, if not specified,
+we'll use the C<DefaultType> specified in the C<spawn()> method.
+
+=item B<_index>
+
+Will cause the document to be indexed into that index, if not specified, the
+C<DefaultIndex> will be used.
+
+=item B<_epoch>
+
+If the C<DefaultIndex> uses a C<strftime> compatible string, you may specify an
+C<_epoch> in every document.  If not specified, we'll assume the epoch to use
+for C<strftime> calculations is the current time.
+
+=back
+
+For more information, see the L<Elasticsearch Bulk API Docs|https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html>.
+
 Example use case:
 
     sub syslog_handle_line {
