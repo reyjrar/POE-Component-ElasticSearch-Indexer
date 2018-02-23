@@ -460,8 +460,8 @@ sub es_queue {
         $heap->{force_flush} = 1;
         $kernel->yield( 'flush' );
     }
-    elsif( !$heap->{flushing} ) {
-        $kernel->delay( flush => $heap->{cfg}{FlushInterval} ) unless $heap->{SHUTDOWN};
+    elsif( $queue_size ) {
+        $kernel->delay_add( flush => $heap->{cfg}{FlushInterval} );
     }
 }
 
@@ -478,7 +478,7 @@ faster.
 sub es_flush {
     my ($kernel,$heap) = @_[KERNEL,HEAP];
 
-    # Remove the scheduler bit for this event:
+    # Remove the scheduler bit for this event
     $kernel->delay('flush');
 
     my $count_docs = exists $heap->{queue} && is_arrayref($heap->{queue}) ? scalar(@{ $heap->{queue} }) : 0;
@@ -499,13 +499,6 @@ sub es_flush {
             $id,
         );
         $kernel->yield( $to => $id );
-
-        # Reschedule our run
-        $kernel->delay( flush => $heap->{cfg}{FlushInterval} ) unless $heap->{SHUTDOWN};
-        $heap->{flushing} = 1;
-    }
-    else {
-        INFO("es_flush($reason) without any docs, bypassing reschedule.");
     }
 }
 
