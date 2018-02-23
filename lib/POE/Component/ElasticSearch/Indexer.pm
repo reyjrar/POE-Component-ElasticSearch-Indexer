@@ -1,4 +1,4 @@
-ackage POE::Component::ElasticSearch::Indexer;
+package POE::Component::ElasticSearch::Indexer;
 # ABSTRACT: POE session to index data to ElasticSearch
 
 use strict;
