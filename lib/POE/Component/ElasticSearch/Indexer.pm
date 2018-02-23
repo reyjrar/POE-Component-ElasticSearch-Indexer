@@ -410,7 +410,7 @@ Example use case:
 sub es_queue {
     my ($kernel,$heap,$data) = @_[KERNEL,HEAP,ARG0];
 
-    return unless $data && is_ref($data);
+    return unless $data;
 
     my $events = is_arrayref($data) ? $data : [$data];
     DOC: foreach my $doc ( @{ $events } ) {
