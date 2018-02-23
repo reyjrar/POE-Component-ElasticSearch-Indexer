@@ -1,4 +1,4 @@
-package POE::Component::ElasticSearch::Indexer;
+ackage POE::Component::ElasticSearch::Indexer;
 # ABSTRACT: POE session to index data to ElasticSearch
 
 use strict;
@@ -32,6 +32,7 @@ This POE Session is used to index data to an ElasticSearch cluster.
 
     my $es_session = POE::Component::ElasticSearch::Indexer->spawn(
         Alias            => 'es',                    # Default
+        Servers          => [qw(localhost)],         # Default
         Timeout          => 10,                      # Default
         FlushInterval    => 30,                      # Default
         FlushSize        => 1_000,                   # Default
@@ -64,6 +65,11 @@ following parameters.
 
 The alias this session is available to other sessions as.  The default is
 B<es>.
+
+=item B<Servers>
+
+A list of Elasticsearch hosts for connections.  Maybe in the form of
+C<hostname> or C<hostname:port>.
 
 =item B<LoggingConfig>
 
@@ -164,6 +170,7 @@ sub spawn {
     # Build Configuration
     my %CONFIG = (
         Alias         => 'es',
+        Servers       => [qw(localhost)],
         Timeout       => 10,
         FlushInterval => 30,
         FlushSize     => 1_000,
@@ -226,7 +233,7 @@ sub spawn {
     );
 
     # Connection Pooling
-    my $num_servers  = scalar( @{ $CONFIG{servers} } );
+    my $num_servers  = scalar( @{ $CONFIG{Servers} } );
     my $num_per_host = 3;
     my $num_open     = $num_servers * $num_per_host;
     my $pool = POE::Component::Client::Keepalive->new(
@@ -591,7 +598,7 @@ sub es_batch {
     return unless length $batch;
 
     # Build the URI
-    my ($server,$port) = split /\:/, $heap->{cfg}{servers}[int rand scalar @{$heap->{cfg}{servers}}];
+    my ($server,$port) = split /\:/, $heap->{cfg}{Servers}[int rand scalar @{$heap->{cfg}{Servers}}];
     my $uri = URI->new();
         $uri->scheme('http');
         $uri->host($server);
