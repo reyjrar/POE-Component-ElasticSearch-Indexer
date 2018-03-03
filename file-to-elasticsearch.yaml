@@ -1,0 +1,19 @@
+---
+elasticsearch:
+  servers: [ "localhost:9200" ]
+
+tail:
+  - file: '/var/log/osquery/result.log'
+    decode: json
+    extract:
+      - by: split
+        from: name
+        when: '^pack'
+        into: 'pack'
+        split_on: '/'
+        split_parts: [ null, "name", "report" ]
+    mutate:
+      prune: true
+      remove: [ "calendarTime", "epoch", "counter", "_raw" ]
+      rename:
+        unixTime: _epoch
