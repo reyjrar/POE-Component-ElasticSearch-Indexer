@@ -8,6 +8,7 @@ use Hash::Merge::Simple qw(merge);
 use JSON::MaybeXS qw(decode_json);
 use Module::Load qw(load);
 use Module::Loaded qw(is_loaded);
+use Ref::Util qw(is_arrayref is_hashref);
 use YAML ();
 
 sub POE::Kernel::ASSERT_DEFAULT { 1 }
@@ -16,8 +17,7 @@ use POE qw(
     Wheel::FollowTail
 );
 
-my %ModuleTried = ();
-const my %DEFAULT => (
+my %DEFAULT = (
     config => '/etc/file-to-elasticsearch.yaml',
 );
 
@@ -71,7 +71,7 @@ sub main_start {
     }
 
     my $es = $config->{elasticsearch} || {};
-    $heapa->{elasticsearch} = POE::Component::ElasticSearch::Indexer->spawn(
+    $heap->{elasticsearch} = POE::Component::ElasticSearch::Indexer->spawn(
         Alias         => 'es',
         Servers       => $es->{servers} || [qw( localhost:9200 )],
         Timeout       => $es->{timeout} || 5,
@@ -109,7 +109,7 @@ sub got_new_line {
 
     my $doc;
     if( $instr->{decode} ) {
-        my $decoders = ref $instr->{decode} eq 'ARRAY' ? $instr->{decode} : [ $instr->{decode} ];
+        my $decoders = is_arrayref($instr->{decode}) ? $instr->{decode} : [ $instr->{decode} ];
         foreach my $decoder ( @{ $decoders } ) {
             if( $decoder eq 'json' ) {
                 my $start = index('{', $line);
@@ -129,7 +129,7 @@ sub got_new_line {
                         load "Parse::Syslog::Line";
                         1;
                     } or do {
-                        my $error = $@;
+                        my $err = $@;
                         die "To use the 'syslog' decoder, please install Parse::Syslog::Line: $err";
                     };
                 }
@@ -158,7 +158,7 @@ sub got_new_line {
                             if( my $into = $extract->{into} ) {
                                 # Make sure we have a hash reference
                                 $doc ||=  {};
-                                $doc->{$into} = {} unless ref $doc->{$into} eq 'HASH';
+                                $doc->{$into} = {} unless is_hashref($doc->{$into});
                                 $doc->{$into}{$keys->[$i]} = $parts[$i];
                             }
                             else {
@@ -170,7 +170,7 @@ sub got_new_line {
                     else {
                         # This is an array, so it's simple
                         my $target = $extract->{into} ? $extract->{into} : $extract->{from};
-                        $doc->{$target} = @parts > 1 [ grep { defined and length } @parts ] : $parts[0];
+                        $doc->{$target} = @parts > 1  ? [ grep { defined and length } @parts ] : $parts[0];
                     }
                 }
                 elsif( $extract->{by} eq 'regex' ) {
@@ -191,7 +191,7 @@ sub got_new_line {
         # Copy
         if( my $copy = $mutate->{copy} ) {
             foreach my $k ( keys %{ $copy } ) {
-                my $destinations = ref $copy->{$k} eq 'ARRAY' ? $copy->{$k} : [ $copy->{$k} ];
+                my $destinations = is_arrayref($copy->{$k}) ? $copy->{$k} : [ $copy->{$k} ];
                 foreach my $dst ( @{ $destinations } ) {
                     $doc->{$dst} = $doc->{$k};
                 }
