@@ -5,8 +5,9 @@ use warnings;
 
 use Getopt::Long::Descriptive qw(describe_options);
 use Hash::Merge::Simple qw(merge);
-use JSON::MaybeXS qw(decode_json);
-use Module::Load qw(load);
+use JSON::MaybeXS qw(decode_json encode_json);
+use Log::Log4perl qw(:easy);
+use Module::Load qw(autoload);
 use Module::Loaded qw(is_loaded);
 use Ref::Util qw(is_arrayref is_hashref);
 use YAML ();
@@ -19,12 +20,20 @@ use POE qw(
 
 my %DEFAULT = (
     config => '/etc/file-to-elasticsearch.yaml',
+    stats_interval => 60,
 );
 
 my ($opt,$usage) = describe_options('%c %o',
     ['config|c:s', "Config file, default: $DEFAULT{config}",
-        { default => $DEFAULT{config}, callback => { "must be a readable file" => sub { -r $_ } } }
+        { default => $DEFAULT{config}, callbacks => { "must be a readable file" => sub { -r $_[0] } } }
     ],
+    ['log4perl-config|L:s', "Log4perl Configuration to use, defaults to STDERR",
+        { callbacks => { "must be a readable file" => sub { -r $_[0] } } }
+    ],
+    ['stats-interval|s:i', "Seconds between displaying statistics, default: $DEFAULT{stats_interval}",
+        { default => $DEFAULT{stats_interval} },
+    ],
+    ['debug',       "Enable most verbose output" ],
     [],
     ['help', "Display this help.", { shortcircuit => 1 }],
 );
@@ -36,14 +45,30 @@ if( $opt->help ) {
 
 my $config = YAML::LoadFile( $opt->config );
 
+# Initialize Logging
+my $level = $opt->debug ? 'TRACE' : 'DEBUG';
+my $loggingConfig = $opt->log4perl_config || \qq{
+    log4perl.logger = $level, Screen
+    log4perl.appender.Screen = Log::Log4perl::Appender::ScreenColoredLevels
+    log4perl.appender.Screen.layout   = PatternLayout
+    log4perl.appender.Screen.layout.ConversionPattern = %d [%P] %p - %m%n
+};
+Log::Log4perl->init($loggingConfig);
+
 my $main = POE::Session->create(
     inline_states => {
        _start => \&main_start,
        _stop  => \&main_stop,
        _child => \&main_child,
+       stats  => \&main_stats,
+
+       got_new_line     => \&got_new_line,
+       get_error        => \&got_error,
+       log4perl_refresh => \&log4perl_refresh,
     },
     heap => {
         config => $config,
+        stats  => {},
     },
 );
 
@@ -56,8 +81,11 @@ sub main_start {
     my $config = $heap->{config};
     my %defaults = (
         interval => 5,
-        index    => 'logstash-%Y.%m.%d',
+        index    => 'files-%Y.%m.%d',
+        type     => 'log',
     );
+
+    my $files = 0;
     foreach my $tail ( @{ $config->{tail} } ) {
         if( -r $tail->{file} ) {
             my $wheel = POE::Wheel::FollowTail->new(
@@ -67,8 +95,16 @@ sub main_start {
                 PollInterval => $tail->{interval} || $defaults{interval},
             );
             $heap->{wheels}{$wheel->ID} = $wheel;
+            $heap->{instructions}{$wheel->ID} = {
+                %defaults,
+                %{ $tail },
+            };
+            $files++;
+            DEBUG(sprintf "Wheel %d tailing %s", $wheel->ID, $tail->{file});
         }
     }
+
+    die sprintf("No files found to tail in %s", $opt->config) unless $files > 0;
 
     my $es = $config->{elasticsearch} || {};
     $heap->{elasticsearch} = POE::Component::ElasticSearch::Indexer->spawn(
@@ -77,35 +113,85 @@ sub main_start {
         Timeout       => $es->{timeout} || 5,
         FlushInterval => $es->{flush_interval} || 10,
         FlushSize     => $es->{flush_size} || 100,
+        LoggingConfig => $loggingConfig,
+        StatsInterval => $opt->stats_interval,
+        StatsHandler  => sub {
+            my ($stats) = @_;
+            foreach my $k (keys %{ $stats }) {
+                $heap->{stats}{$k} ||= 0;
+                $heap->{stats}{$k}++;
+            }
+        },
+        exists $es->{index} ? ( DefaultIndex => $es->{index} ) : (),
+        exists $es->{type}  ? ( DefaultType  => $es->{type}  ) : (),
     );
+
+    # Watch the Log4perl Config
+    $kernel->delay( log4perl_refresh => 60 ) if $opt->log4perl_config;
+    $kernel->delay( stats => $opt->stats_interval );
+
+    INFO("Started $0 watching $files files.");
 }
 
 sub main_stop {
     $poe_kernel->post( es => 'shutdown' );
+    FATAL("Shutting down $0");
 }
 
 sub main_child {
+    my ($kernel,$heap,$reason,$child) = @_[KERNEL,HEAP,ARG0,ARG1];
+    INFO(sprintf "Child [%d] %s event.", $child->ID, $reason);
+}
+
+sub main_stats {
     my ($kernel,$heap) = @_[KERNEL,HEAP];
+
+    # Reschedule
+    $kernel->delay( stats => $opt->stats_interval );
+
+    # Collect our stats
+    my $stats = delete $heap->{stats};
+    $heap->{stats} = {};
+
+    # Display them
+    INFO("STATS - " . join(", ", map {"$_=$stats->{$_}"} sort keys %{ $stats }));
 }
 
 sub got_error {
-    my ($kernel,$heap,$operation,$errnum,$errstr,$wheel_id) = @_[KERNEL,HEAP,ARG0..ARG3];
+    my ($kernel,$heap,$op,$errnum,$errstr,$wheel_id) = @_[KERNEL,HEAP,ARG0..ARG3];
+
+    ERROR("Wheel $wheel_id during $op got $errnum : $errstr");
 
     # Remove the Wheel from the polling
     if( exists $heap->{wheels}{$wheel_id} ) {
         delete $heap->{wheels}{$wheel_id};
+        $heap->{stats}{wheel_error} ||= 0;
+        $heap->{stats}{wheel_error}++;
     }
 
     # Close the ElasticSearch session if this is the last wheel
-    if( !keys %{ $heap->{wheel} } ) {
+    if( !keys %{ $heap->{wheels} } ) {
         $kernel->post( es => 'shutdown' );
     }
+}
+
+sub log4perl_refresh {
+    my $kernel = $_[KERNEL];
+    TRACE("Rescanning Log4perl configuration at" . $opt->log4perl_config);
+    # Reschedule
+    $kernel->delay( log4perl_refresh => 60 );
+    # Rescan the Log4perl configuration
+    Log::Log4perl::Config->watcher->force_next_check();
+    return;
 }
 
 sub got_new_line {
     my ($kernel,$heap,$line,$wheel_id) = @_[KERNEL,HEAP,ARG0,ARG1];
 
-    my $instr = $heap->{wheels}{$wheel_id};
+    $heap->{stats}{received} ||= 0;
+    $heap->{stats}{received}++;
+
+    my $instr = $heap->{instructions}{$wheel_id};
 
     my $doc;
     if( $instr->{decode} ) {
@@ -119,6 +205,8 @@ sub got_new_line {
                     $new = decode_json($blob);
                     1;
                 } or do {
+                    my $err = $@;
+                    TRACE("Bad JSON, error: $err\n$blob");
                     next;
                 };
                 $doc = merge( $doc, $new );
@@ -126,12 +214,14 @@ sub got_new_line {
             elsif( $decoder eq 'syslog' ) {
                 unless( is_loaded('Parse::Syslog::Line') ) {
                     eval {
-                        load "Parse::Syslog::Line";
+                        autoload "Parse::Syslog::Line";
                         1;
                     } or do {
                         my $err = $@;
                         die "To use the 'syslog' decoder, please install Parse::Syslog::Line: $err";
                     };
+                    no warnings qw(once);
+                    $Parse::Syslog::Line::PruneRaw = 1;
                 }
                 # If we make it here, we're ready to parse
                 $doc = parse_syslog_line($line);
@@ -183,8 +273,12 @@ sub got_new_line {
     # Skip if the document isn't put together yet
     return unless $doc;
 
+    $heap->{stats}{docs} ||= 0;
+    $heap->{stats}{docs}++;
+
     # Store Line in _raw now
-    $doc->{_raw} = $line;
+    $doc->{_raw}  = $line;
+    $doc->{_path} = $instr->{file};
 
     # Mutators
     if( my $mutate = $instr->{mutate} ) {
@@ -223,6 +317,14 @@ sub got_new_line {
                 delete $doc->{$k} unless defined $doc->{$k} and length $doc->{$k};
             }
         }
+    }
+
+    foreach my $meta (qw(index type)) {
+        $doc->{"_$meta"} = $instr->{$meta} if exists $instr->{$meta};
+    }
+
+    if( $opt->debug ) {
+        TRACE("Indexing: " . encode_json($doc));
     }
 
     # Send the document to ElasticSearch
