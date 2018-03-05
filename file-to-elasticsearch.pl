@@ -154,7 +154,9 @@ sub main_stats {
     $heap->{stats} = {};
 
     # Display them
-    INFO("STATS - " . join(", ", map {"$_=$stats->{$_}"} sort keys %{ $stats }));
+    my $message = keys %{ $stats } ? join(", ", map {"$_=$stats->{$_}"} sort keys %{ $stats })
+                : "Nothing to report.";
+    INFO("STATS - $message");
 }
 
 sub got_error {
