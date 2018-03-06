@@ -236,7 +236,9 @@ sub got_new_line {
         foreach my $extract( @{ $extracters } ) {
             # Only process items with a "by"
             if( $extract->{by} ) {
-                my $from = $extract->{from} || $line;
+                my $from = $extract->{from} ? ( is_hashref($doc) && exists $doc->{$extract->{from}} ? $doc->{$extract->{from}} : undef )
+                         : $line;
+                next unless $from;
                 if( $extract->{when} ) {
                     next unless $from =~ /$extract->{when}/;
                 }
@@ -246,7 +248,8 @@ sub got_new_line {
                     if( my $keys = $extract->{split_parts} ) {
                         # Name parts
                         for( my $i = 0; $i < @parts; $i++ ) {
-                            next unless $keys->[$i] and $parts[$i];
+                            next unless $keys->[$i] and length $keys->[$i] and $parts[$i];
+                            next if lc $keys->[$i] eq 'null' or lc $keys->[$i] eq 'undef';
                             if( my $into = $extract->{into} ) {
                                 # Make sure we have a hash reference
                                 $doc ||=  {};

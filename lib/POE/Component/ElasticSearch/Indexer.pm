@@ -430,7 +430,7 @@ sub es_queue {
             my $epoch = $doc->{_epoch} ? delete $doc->{_epoch} : time;
             my $index = $doc->{_index} ? delete $doc->{_index} : $heap->{cfg}{DefaultIndex};
             my %meta = (
-                _index => $index =~ /%/  ? strftime($index,localtime($epoch)) : $index,
+                _index => index($index,'%') >= 0 ? strftime($index,localtime($epoch)) : $index,
                 _type  => $doc->{_type}  ? delete $doc->{_type}  : $heap->{cfg}{DefaultType},
                 $doc->{_id} ? ( _id => delete $doc->{_id} ) : (),
             );
