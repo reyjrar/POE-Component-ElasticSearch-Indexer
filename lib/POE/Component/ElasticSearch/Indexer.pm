@@ -115,10 +115,10 @@ Checked every ten batches.
 
 You may specify either as absolute bytes or using shortcuts:
 
-    BathDiskSpace => 500kb,
-    BathDiskSpace => 100mb,
-    BathDiskSpace => 10gb,
-    BathDiskSpace => 1tb,
+    BatchDiskSpace => 500kb,
+    BatchDiskSpace => 100mb,
+    BatchDiskSpace => 10gb,
+    BatchDiskSpace => 1tb,
 
 =item B<StatsHandler>
 
