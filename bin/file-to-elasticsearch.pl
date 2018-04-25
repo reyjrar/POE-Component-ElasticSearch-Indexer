@@ -1,5 +1,6 @@
 #!perl
-#
+# PODNAME: files-to-elasticsearch.pl
+# ABSTRACT: A simple utility to tail a file and index each line as a document in ElasticSearch
 use strict;
 use warnings;
 
@@ -7,7 +8,7 @@ use Getopt::Long::Descriptive qw(describe_options);
 use Hash::Merge::Simple qw(merge);
 use JSON::MaybeXS qw(decode_json encode_json);
 use Log::Log4perl qw(:easy);
-use Module::Load qw(autoload);
+use Module::Load qw(load);
 use Module::Loaded qw(is_loaded);
 use Ref::Util qw(is_arrayref is_hashref);
 use YAML ();
@@ -216,7 +217,7 @@ sub got_new_line {
             elsif( $decoder eq 'syslog' ) {
                 unless( is_loaded('Parse::Syslog::Line') ) {
                     eval {
-                        autoload "Parse::Syslog::Line";
+                        load "Parse::Syslog::Line";
                         1;
                     } or do {
                         my $err = $@;
@@ -226,7 +227,7 @@ sub got_new_line {
                     $Parse::Syslog::Line::PruneRaw = 1;
                 }
                 # If we make it here, we're ready to parse
-                $doc = parse_syslog_line($line);
+                $doc = Parse::Syslog::Line::parse_syslog_line($line);
             }
         }
     }

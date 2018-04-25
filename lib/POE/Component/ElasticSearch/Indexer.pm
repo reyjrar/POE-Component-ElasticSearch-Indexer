@@ -177,6 +177,7 @@ sub spawn {
         DefaultIndex  => 'logs-%Y.%m.%d',
         DefaultType   => 'log',
         BatchDir      => '/tmp/es_index_backlog',
+        StatsInterval => 60,
         %params,
     );
     if( $CONFIG{Templates} ) {
@@ -198,7 +199,7 @@ sub spawn {
     }
 
     # Management Session
-    POE::Session->create(
+    my $session = POE::Session->create(
         inline_states => {
             _start    => \&_start,
             _child    => \&_child,
@@ -274,7 +275,12 @@ sub _start {
     # Run through the backlog
     $kernel->delay( backlog => 2 );
     $heap->{backlog_scheduled} = 1;
+
+    # For now, we just state we're ready
     $heap->{es_ready} = 1;
+
+    # Schedule Statistics Run
+    $kernel->delay( stats => $heap->{cfg}{StatsInterval} );
 }
 
 sub _child {
@@ -306,7 +312,7 @@ sub _stats {
         };
     }
     # Also output at TRACE level
-    INFO( "STATS - " .
+    TRACE( "STATS - " .
         scalar(keys %$stats) ? join(', ', map { "$_=$stats->{$_}" } sort keys %$stats )
                              : 'Nothing to report.'
     );
@@ -485,6 +491,10 @@ sub es_flush {
 
     my $count_docs = exists $heap->{queue} && is_arrayref($heap->{queue}) ? scalar(@{ $heap->{queue} }) : 0;
     my $reason     = exists $heap->{force_flush} && delete $heap->{force_flush} ? 'force' : 'schedule';
+
+    # Record the flush
+    $heap->{stats}{"es_flush_$reason"} ||= 0;
+    $heap->{stats}{"es_flush_$reason"}++;
 
     if( $count_docs > 0 ) {
         # Build the batch
