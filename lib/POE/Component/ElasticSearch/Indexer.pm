@@ -208,6 +208,7 @@ sub spawn {
             batch     => \&es_batch,
             save      => \&es_save,
             backlog   => \&es_backlog,
+            shutdown  => \&es_shutdown,
             #health    => \&es_health,
 
             # Templates
