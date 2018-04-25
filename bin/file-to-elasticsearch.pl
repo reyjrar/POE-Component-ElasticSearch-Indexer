@@ -10,6 +10,7 @@ use JSON::MaybeXS qw(decode_json encode_json);
 use Log::Log4perl qw(:easy);
 use Module::Load qw(load);
 use Module::Loaded qw(is_loaded);
+use Pod::Usage;
 use Ref::Util qw(is_arrayref is_hashref);
 use YAML ();
 
@@ -36,13 +37,15 @@ my ($opt,$usage) = describe_options('%c %o',
     ],
     ['debug',       "Enable most verbose output" ],
     [],
-    ['help', "Display this help.", { shortcircuit => 1 }],
+    ['help',       "Display this help.", { shortcircuit => 1 }],
+    ['manual|pod', "Display the user manaul.", { shortcircuit => 1 }],
 );
 
 if( $opt->help ) {
     print $usage->text;
     exit 0;
 }
+pod2usage( -verbose => 2, -exitval => 0 ) if $opt->manual;
 
 my $config = YAML::LoadFile( $opt->config );
 
@@ -336,3 +339,47 @@ sub got_new_line {
     # Send the document to ElasticSearch
     $kernel->post( es => queue => $doc );
 }
+__END__
+=pod
+
+=head1 SYNOPSIS
+
+To see available options, run:
+
+    file-to-elasticsearch.pl --help
+
+Create a config file and run the utility:
+
+    file-to-elasticsearch.pl --config config.yaml --log4perl logging.conf --debug
+
+This will run a single threaded POE instance that will tail the log files
+you've requested, performing the requested transformations and sending them to
+the elasticsearch cluster and index you've specified.
+
+=head1 CONFIGURATION
+
+The configuration file is YAML and looks like:
+
+    ---
+    elasticsearch:
+      servers: [ "localhost:9200" ]
+      type: "log"
+      index: "syslog-%Y.%m.%d"
+
+    tail:
+      - file: '/var/log/osquery/result.log'
+        index: "osquery-result-%Y.%m.%d"
+        decode: json
+        extract:
+          - by: split
+            from: name
+            when: '^pack'
+            into: 'pack'
+            split_on: '/'
+            split_parts: [ null, "name", "report" ]
+        mutate:
+          prune: true
+          remove: [ "calendarTime", "epoch", "counter", "_raw" ]
+          rename:
+            unixTime: _epoch
+
