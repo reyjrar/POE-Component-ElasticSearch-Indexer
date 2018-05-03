@@ -238,7 +238,7 @@ sub spawn {
     DEBUG(sprintf "Spawned an HTTP Pool for %d servers: %d max connections, %d max per host.",
         $num_servers, @CONFIG{qw(MaxConnsTotal MaxConnsPerServer)}
     );
-    return;
+    return $session;
 }
 
 #------------------------------------------------------------------------#
