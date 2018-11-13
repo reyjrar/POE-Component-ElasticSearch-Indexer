@@ -85,6 +85,10 @@ the creation of a L<POE::Component::Client::Keepalive> connection pool.
 
 Defaults to B<MaxConnsPerServer * number of Servers>.
 
+=item B<MaxPendingRequests>
+
+Maximum number of requests backlogged in the connection pool.  Defaults to B<100>.
+
 =item B<LoggingConfig>
 
 The L<Log::Log4perl> configuration file for the indexer to use.  Defaults to
@@ -168,16 +172,17 @@ sub spawn {
 
     # Build Configuration
     my %CONFIG = (
-        Alias             => 'es',
-        Servers           => [qw(localhost)],
-        Timeout           => 10,
-        FlushInterval     => 30,
-        FlushSize         => 1_000,
-        DefaultIndex      => 'logs-%Y.%m.%d',
-        DefaultType       => 'log',
-        BatchDir          => '/tmp/es_index_backlog',
-        StatsInterval     => 60,
-        MaxConnsPerServer => 3,
+        Alias              => 'es',
+        Servers            => [qw(localhost)],
+        Timeout            => 10,
+        FlushInterval      => 30,
+        FlushSize          => 1_000,
+        DefaultIndex       => 'logs-%Y.%m.%d',
+        DefaultType        => 'log',
+        BatchDir           => '/tmp/es_index_backlog',
+        StatsInterval      => 60,
+        MaxConnsPerServer  => 3,
+        MaxPendingRequests => 100,
         %params,
     );
     if( $CONFIG{BatchDiskSpace} ) {
@@ -284,6 +289,12 @@ sub _stats {
     # Extract the stats from the heap
     my $stats = delete $heap->{stats};
     $heap->{stats} = {};
+
+    # Fetch the pending request count from the HTTP client
+    $stats->{pending_requests} = $kernel->call( http => 'pending_request_count' );
+
+    # Check and set readiness
+    $heap->{es_ready} = $stats->{pending_requests} < $heap->{cfg}{MaxPendingRequests};
 
     # Display our stats
     if( is_coderef($heap->{cfg}{StatsHandler}) ) {

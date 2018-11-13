@@ -4,7 +4,7 @@ POE::Component::ElasticSearch::Indexer - POE session to index data to ElasticSea
 
 # VERSION
 
-version 0.004
+version 0.005
 
 # SYNOPSIS
 
@@ -63,6 +63,10 @@ following parameters.
     the creation of a [POE::Component::Client::Keepalive](https://metacpan.org/pod/POE::Component::Client::Keepalive) connection pool.
 
     Defaults to **MaxConnsPerServer \* number of Servers**.
+
+- **MaxPendingRequests**
+
+    Maximum number of requests backlogged in the connection pool.  Defaults to **100**.
 
 - **LoggingConfig**
 
