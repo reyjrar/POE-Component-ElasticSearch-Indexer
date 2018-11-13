@@ -291,7 +291,7 @@ sub _stats {
     $heap->{stats} = {};
 
     # Fetch the pending request count from the HTTP client
-    $stats->{pending_requests} = $kernel->call( http => 'pending_request_count' );
+    $stats->{pending_requests} = $kernel->call( http => 'pending_requests_count' );
 
     # Check and set readiness
     $heap->{es_ready} = $stats->{pending_requests} < $heap->{cfg}{MaxPendingRequests};
