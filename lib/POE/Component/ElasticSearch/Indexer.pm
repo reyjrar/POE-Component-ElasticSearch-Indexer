@@ -757,7 +757,8 @@ sub es_cleanup {
         return unless $p->basename =~ /\.batch$/;
 
         # Figure out the average size
-        $total += my $size = $p->stat->size;
+        my $size = $p->stat->size;
+        $total += $size;
         push @files, {
             path  => $p,
             size  => $size,
