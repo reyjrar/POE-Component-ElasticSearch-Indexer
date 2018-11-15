@@ -674,7 +674,6 @@ sub resp_bulk {
             if( exists $details->{errors} && $details->{errors} ) {
                 $heap->{stats}{errors} ||= 0;
                 $heap->{stats}{errors} += scalar grep { exists $_->{create} && exists $_->{create}{error} } @{ $details->{items} };
-                TRACE("ERRORS:" . encode_json($details->{errors}));
             }
         }
         else {
