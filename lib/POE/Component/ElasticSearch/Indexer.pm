@@ -33,7 +33,7 @@ This POE Session is used to index data to an ElasticSearch cluster.
     my $es_session = POE::Component::ElasticSearch::Indexer->spawn(
         Alias            => 'es',                    # Default
         Servers          => [qw(localhost)],         # Default
-        Timeout          => 10,                      # Default
+        Timeout          => 1,                       # Default
         FlushInterval    => 30,                      # Default
         FlushSize        => 1_000,                   # Default
         LoggingConfig    => undef,                   # Default
@@ -87,7 +87,7 @@ Defaults to B<MaxConnsPerServer * number of Servers>.
 
 =item B<MaxPendingRequests>
 
-Maximum number of requests backlogged in the connection pool.  Defaults to B<100>.
+Maximum number of requests backlogged in the connection pool.  Defaults to B<5>.
 
 =item B<LoggingConfig>
 
@@ -138,6 +138,11 @@ You may specify either as absolute bytes or using shortcuts:
     BatchDiskSpace => 10gb,
     BatchDiskSpace => 1tb,
 
+=item B<MaxRecoveryBatches>
+
+The number of batches to process per backlog event.  This will only come into
+play if there are batches on disk to flush.  Defaults to B<25>.
+
 =item B<StatsHandler>
 
 A code reference that will be passed a hash reference containing the keys and
@@ -174,7 +179,7 @@ sub spawn {
     my %CONFIG = (
         Alias              => 'es',
         Servers            => [qw(localhost)],
-        Timeout            => 10,
+        Timeout            => 1,
         FlushInterval      => 30,
         FlushSize          => 1_000,
         DefaultIndex       => 'logs-%Y.%m.%d',
@@ -182,7 +187,8 @@ sub spawn {
         BatchDir           => '/tmp/es_index_backlog',
         StatsInterval      => 60,
         MaxConnsPerServer  => 3,
-        MaxPendingRequests => 100,
+        MaxPendingRequests => 5,
+        MaxRecoveryBatches => 25,
         %params,
     );
     if( $CONFIG{BatchDiskSpace} ) {
@@ -208,6 +214,7 @@ sub spawn {
             batch     => \&es_batch,
             save      => \&es_save,
             backlog   => \&es_backlog,
+            cleanup   => \&es_cleanup,
             shutdown  => \&es_shutdown,
             #health    => \&es_health,
 
@@ -527,7 +534,7 @@ sub es_backlog {
 
     delete $heap->{backlog_scheduled};
 
-    my $max_batches = 25;
+    my $max_batches = $heap->{cfg}{MaxRecoveryBatches};
     my $batch_dir = path($heap->{cfg}{BatchDir});
 
     # randomize
@@ -644,7 +651,7 @@ sub resp_bulk {
     TRACE(sprintf "bulk_resp(%s) %s", $id, $r->status_line);
 
     # Record the responses we receive
-    my $resp_key = "bulk_" . $r->is_success ? 'success' : 'failure';
+    my $resp_key = "bulk_" . ($r->is_success ? 'success' : 'failure');
     $heap->{stats}{$resp_key} ||= 0;
     $heap->{stats}{$resp_key}++;
 
@@ -667,6 +674,7 @@ sub resp_bulk {
             if( exists $details->{errors} && $details->{errors} ) {
                 $heap->{stats}{errors} ||= 0;
                 $heap->{stats}{errors} += scalar grep { exists $_->{create} && exists $_->{create}{error} } @{ $details->{items} };
+                TRACE("ERRORS:" . encode_json($details->{errors}));
             }
         }
         else {
@@ -680,9 +688,11 @@ sub resp_bulk {
         $batch_file->remove if $batch_file->is_file;
         delete $heap->{start}{$id};
     }
-    else {
-        # Write batch to disk, unless it exists.
-        $kernel->yield( save => $id ) unless $batch_file->is_file;
+    elsif( !$batch_file->is_file ) {
+        # Reload the batch into the heap
+        $heap->{batch}{$id} = $req->content;
+        # Write batch to disk
+        $kernel->yield( save => $id );
     }
     # Remove the lock
     unlock_batch_file($batch_file);
