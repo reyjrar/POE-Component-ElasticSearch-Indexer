@@ -89,6 +89,12 @@ Defaults to B<MaxConnsPerServer * number of Servers>.
 
 Maximum number of requests backlogged in the connection pool.  Defaults to B<5>.
 
+=item B<MaxFailedRatio>
+
+A number between 0 and 1 representing a percentage of bulk requests that can
+fail before we back off the cluster for the B<StatsInterval>.  This is
+calculated every B<StatsInterval>.  The default is B<0.5> or 50%.
+
 =item B<LoggingConfig>
 
 The L<Log::Log4perl> configuration file for the indexer to use.  Defaults to
@@ -153,6 +159,22 @@ code is run.
 
 Run the C<StatsHandler> every C<StatsInterval> seconds.  Default to B<60>.
 
+=item B<BacklogInterval>
+
+Run the backlog processing event  every C<BacklogInterval> seconds.  Default to B<60>.
+Will process up to C<MaxRecoveryBatches> batches per C<BacklogInterval>.
+
+This event only fires when there are batches on disk.  When it's done
+processing them, it will then stop firing.
+
+=item B<CleanupInterval>
+
+Run the cleanup event  every C<CleanupInterval> seconds.  Default to B<60>.
+This will check to ensure the C<BatchDiskSpace> is honored and delete the
+oldest batches if that is exceeded.
+
+This event only fires when there are batches on disk.
+
 =back
 
 =cut
@@ -186,14 +208,17 @@ sub spawn {
         DefaultType        => 'log',
         BatchDir           => '/tmp/es_index_backlog',
         StatsInterval      => 60,
+        BacklogInterval    => 60,
+        CleanupInterval    => 60,
         MaxConnsPerServer  => 3,
         MaxPendingRequests => 5,
         MaxRecoveryBatches => 25,
+        MaxFailedRatio     => 0.5,
         %params,
     );
     if( $CONFIG{BatchDiskSpace} ) {
         # Human Readable to Computer Readable
-        if( my ($size,$unit) = ($CONFIG{BatchDiskSpace} =~ /(\d+(?:\.\d+))\s*([kmgt])b?/i) ) {
+        if( my ($size,$unit) = ($CONFIG{BatchDiskSpace} =~ /(\d+(?:\.\d+)?)\s*([kmgt])b?/i) ) {
             $unit = lc $unit;
             $CONFIG{BatchDiskSpace} = $unit eq 'k' ? $size * 1_000
                                     : $unit eq 'm' ? $size * 1_000_000
@@ -201,6 +226,14 @@ sub spawn {
                                     : $unit eq 't' ? $size * 1_000_000_000_000
                                     : $size;
         }
+        else {
+            WARN("Disabling cleanup due to bad argument for BatchDiskSpace: '$CONFIG{BatchDiskSpace}', see try something like: 2gb or see docs");
+            delete $CONFIG{BatchDiskSpace};
+        }
+    }
+    if( $CONFIG{MaxFailedRatio} > 1 ) {
+        WARN("Attempt to set MaxFailedRatio to a number greater than 1, reset to default 0.5");
+        $CONFIG{MaxFailedRatio} = 0.5;
     }
 
     # Management Session
@@ -223,13 +256,12 @@ sub spawn {
             #resp_health        => \&resp_health,
         },
         heap => {
-            cfg      => \%CONFIG,
-            stats    => {},
-            start    => {},
-            batch    => {},
-            health   => '',
-            es_ready => 0,
-            batches  => 0,
+            cfg       => \%CONFIG,
+            stats     => {},
+            start     => {},
+            batch     => {},
+            health    => '',
+            es_ready  => 0,
         },
     );
 
@@ -297,11 +329,26 @@ sub _stats {
     my $stats = delete $heap->{stats};
     $heap->{stats} = {};
 
+    # Compute Succes/Fail Ratio
+    my $success = $stats->{bulk_success} || 0;
+    my $failure = $stats->{bulk_failure} || 0;
+
     # Fetch the pending request count from the HTTP client
     $stats->{pending_requests} = $kernel->call( http => 'pending_requests_count' );
 
-    # Check and set readiness
-    $heap->{es_ready} = $stats->{pending_requests} < $heap->{cfg}{MaxPendingRequests};
+    # We tried stuff this go around
+    if( $success >= 0 && $failure == 0 ) {
+        $heap->{es_ready} = 1;
+    }
+    else {
+        # Calculate how much we failed
+        my $ratio  = sprintf "%0.3f", $failure / ($success + $failure);
+        # Check and set readiness
+        $heap->{es_ready} =  $stats->{pending_requests} < $heap->{cfg}{MaxPendingRequests}
+                          && $ratio < $heap->{cfg}{MaxFailedRatio};
+    }
+
+
 
     # Display our stats
     if( is_coderef($heap->{cfg}{StatsHandler}) ) {
@@ -543,7 +590,7 @@ sub es_backlog {
     $kernel->yield( batch => $_ ) for @ids[0..$max_batches-1];
 
     if(@ids > $max_batches) {
-        $kernel->delay( backlog => 15 ) unless $heap->{SHUTDOWN};
+        $kernel->delay( backlog => $heap->{cfg}{BacklogInterval}) unless $heap->{SHUTDOWN};
         $heap->{backlog_scheduled} = 1;
     }
 }
@@ -684,14 +731,22 @@ sub resp_bulk {
                 $@,
             );
         }
+        # Remove the batch file
         $batch_file->remove if $batch_file->is_file;
+        # Clear the start time
         delete $heap->{start}{$id};
+        # This should never happen, but if it does, protect us from memory leaks
+        delete $heap->{batch}{$id} if exists $heap->{batch}{$id};
     }
     elsif( !$batch_file->is_file ) {
         # Reload the batch into the heap
         $heap->{batch}{$id} = $req->content;
         # Write batch to disk
         $kernel->yield( save => $id );
+    }
+    else {
+        # Make sure we consider running the cleanup
+        $kernel->yield( 'cleanup' ) unless $heap->{cleanup_scheduled};
     }
     # Remove the lock
     unlock_batch_file($batch_file);
@@ -722,15 +777,9 @@ sub es_save {
         $heap->{stats}{batches}++;
         $heap->{stats}{backlogged} ||= 0;
         $heap->{stats}{backlogged} += $items;
-
-        # Batch Counter
-        $heap->{batches} = ($heap->{batches} % 10 ) + 1;
-        if( $heap->{batches} >= 10 ) {
-            $kernel->yield('cleanup');
-        }
     }
-    unless( exists $heap->{backlog_scheduled} ) {
-        $kernel->delay( backlog => 60 ) unless $heap->{SHUTDOWN};
+    unless( $heap->{backlog_scheduled} ) {
+        $kernel->delay( backlog => $heap->{cfg}{BacklogInterval} ) unless $heap->{SHUTDOWN};
         $heap->{backlog_scheduled} = 1;
     }
 }
@@ -744,6 +793,8 @@ sub es_cleanup {
 
     # Only run if we need to run
     return unless $heap->{cfg}{BatchDiskSpace};
+    # Rerun the cleanup
+    delete $heap->{cleanup_scheduled};
 
     my $total = 0;
     my $batch_dir = path($heap->{cfg}{BatchDir});
@@ -756,21 +807,44 @@ sub es_cleanup {
         # Skip unless it's a batch file
         return unless $p->basename =~ /\.batch$/;
 
-        # Figure out the average size
-        my $size = $p->stat->size;
-        $total += $size;
-        push @files, {
-            path  => $p,
-            size  => $size,
-            ctime => $p->stat->ctime,
+        # Figure out the size of our batches
+        # We eval() in case another worker deletes the file
+        eval {
+            my $size = $p->stat->size;
+            my $ctime = $p->stat->ctime;
+            die "Invalid size: $size" unless $size > 0;
+            $total += $size;
+            push @files, {
+                path  => $p,
+                size  => $size,
+                ctime => $ctime,
+            };
+            1;
+        } or do {
+            my $err = $@;
+            # Yes this is an error, but we don't want it spamming the logs because it's
+            # not that important.  We log at DEBUG.
+            DEBUG(sprintf "Error checking status of %s: %s", $p->basename, $err)
+                if $err =~ /Invalid size/;
         };
     });
+
+    # Report words
+    DEBUG("es_cleanup(): BatchDiskSpace is '$heap->{cfg}{BatchDiskSpace}', currently $total bytes");
 
     # Delete some stuff
     if( $total > $heap->{cfg}{BatchDiskSpace} ) {
         # Sort oldest to newest
         foreach my $batch ( sort { $a->{ctime} <=> $b->{ctime} } @files ) {
-            next unless lock_batch_file($batch->{path});
+            # Leave early, leave often
+            last if $total < $heap->{cfg}{BatchDiskSpace};
+            # Handle "we can't get lock"
+            if( ! lock_batch_file($batch->{path}) ) {
+                # If we're not the only worker, maybe someone else removed this
+                $total -= $batch->{size} unless $batch->{path}->is_file;
+                next;
+            }
+            # Otherwise, mop up
             my $state = 'success';
             eval {
                 # If we fail, it's because something else delete this file
@@ -778,7 +852,7 @@ sub es_cleanup {
                 1;
             } or do {
                 my $err = $@;
-                TRACE(sprintf "es_cleanup() failed removing %s: %s",
+                WARN(sprintf "es_cleanup() failed removing %s: %s",
                     $batch->{path}->absolute->stringify,
                     $err,
                 );
@@ -789,8 +863,11 @@ sub es_cleanup {
 
             unlock_batch_file($batch->{path});
             $total -= $batch->{size};
-            last if $total < $heap->{cfg}{BatchDiskSpace};
         }
+    }
+    if( $total > 0 ) {
+        $kernel->delay( cleanup => $heap->{cfg}{CleanupInterval} ) unless $heap->{SHUTDOWN};
+        $heap->{cleanup_scheduled} = 1;
     }
 }
 

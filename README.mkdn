@@ -4,7 +4,7 @@ POE::Component::ElasticSearch::Indexer - POE session to index data to ElasticSea
 
 # VERSION
 
-version 0.008
+version 0.010
 
 # SYNOPSIS
 
@@ -67,6 +67,12 @@ following parameters.
 - **MaxPendingRequests**
 
     Maximum number of requests backlogged in the connection pool.  Defaults to **5**.
+
+- **MaxFailedRatio**
+
+    A number between 0 and 1 representing a percentage of bulk requests that can
+    fail before we back off the cluster for the **StatsInterval**.  This is
+    calculated every **StatsInterval**.  The default is **0.5** or 50%.
 
 - **LoggingConfig**
 
@@ -131,6 +137,22 @@ following parameters.
 - **StatsInterval**
 
     Run the `StatsHandler` every `StatsInterval` seconds.  Default to **60**.
+
+- **BacklogInterval**
+
+    Run the backlog processing event  every `BacklogInterval` seconds.  Default to **60**.
+    Will process up to `MaxRecoveryBatches` batches per `BacklogInterval`.
+
+    This event only fires when there are batches on disk.  When it's done
+    processing them, it will then stop firing.
+
+- **CleanupInterval**
+
+    Run the cleanup event  every `CleanupInterval` seconds.  Default to **60**.
+    This will check to ensure the `BatchDiskSpace` is honored and delete the
+    oldest batches if that is exceeded.
+
+    This event only fires when there are batches on disk.
 
 ## EVENTS
 
