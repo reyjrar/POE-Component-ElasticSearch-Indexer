@@ -72,7 +72,7 @@ following parameters.
 
     A number between 0 and 1 representing a percentage of bulk requests that can
     fail before we back off the cluster for the **StatsInterval**.  This is
-    calculated every **StatsInterval**.  The default is **0.5** or 50%.
+    calculated every **StatsInterval**.  The default is **0.8** or 80%.
 
 - **LoggingConfig**
 
@@ -82,7 +82,8 @@ following parameters.
 - **Timeout**
 
     Number of seconds for the HTTP transport connect and transport timeouts.
-    Defaults to **10** seconds.
+    Defaults to **5** seconds.  The total request timeout, waiting for an open
+    connection slot and then completing the request, will be this multiplied by 2.
 
 - **FlushInterval**
 
@@ -126,7 +127,7 @@ following parameters.
 - **MaxRecoveryBatches**
 
     The number of batches to process per backlog event.  This will only come into
-    play if there are batches on disk to flush.  Defaults to **25**.
+    play if there are batches on disk to flush.  Defaults to **10**.
 
 - **StatsHandler**
 
