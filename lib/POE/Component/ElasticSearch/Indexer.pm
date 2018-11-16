@@ -93,7 +93,7 @@ Maximum number of requests backlogged in the connection pool.  Defaults to B<5>.
 
 A number between 0 and 1 representing a percentage of bulk requests that can
 fail before we back off the cluster for the B<StatsInterval>.  This is
-calculated every B<StatsInterval>.  The default is B<0.5> or 50%.
+calculated every B<StatsInterval>.  The default is B<0.8> or 80%.
 
 =item B<LoggingConfig>
 
@@ -103,7 +103,8 @@ writing logs to the current directory into the file C<es_indexing.log>.
 =item B<Timeout>
 
 Number of seconds for the HTTP transport connect and transport timeouts.
-Defaults to B<10> seconds.
+Defaults to B<5> seconds.  The total request timeout, waiting for an open
+connection slot and then completing the request, will be this multiplied by 2.
 
 =item B<FlushInterval>
 
@@ -147,7 +148,7 @@ You may specify either as absolute bytes or using shortcuts:
 =item B<MaxRecoveryBatches>
 
 The number of batches to process per backlog event.  This will only come into
-play if there are batches on disk to flush.  Defaults to B<25>.
+play if there are batches on disk to flush.  Defaults to B<10>.
 
 =item B<StatsHandler>
 
@@ -201,7 +202,7 @@ sub spawn {
     my %CONFIG = (
         Alias              => 'es',
         Servers            => [qw(localhost)],
-        Timeout            => 1,
+        Timeout            => 5,
         FlushInterval      => 30,
         FlushSize          => 1_000,
         DefaultIndex       => 'logs-%Y.%m.%d',
@@ -212,8 +213,8 @@ sub spawn {
         CleanupInterval    => 60,
         MaxConnsPerServer  => 3,
         MaxPendingRequests => 5,
-        MaxRecoveryBatches => 25,
-        MaxFailedRatio     => 0.5,
+        MaxRecoveryBatches => 10,
+        MaxFailedRatio     => 0.8,
         %params,
     );
     if( $CONFIG{BatchDiskSpace} ) {
@@ -232,8 +233,8 @@ sub spawn {
         }
     }
     if( $CONFIG{MaxFailedRatio} > 1 ) {
-        WARN("Attempt to set MaxFailedRatio to a number greater than 1, reset to default 0.5");
-        $CONFIG{MaxFailedRatio} = 0.5;
+        WARN("Attempt to set MaxFailedRatio to a number greater than 1, reset to default 0.8");
+        $CONFIG{MaxFailedRatio} = 0.8;
     }
 
     # Management Session
@@ -277,7 +278,7 @@ sub spawn {
     POE::Component::Client::HTTP->spawn(
         Alias             => 'http',
         ConnectionManager => $pool,
-        Timeout           => $CONFIG{Timeout} + 1,   # Give ES 1 second to transit
+        Timeout           => $CONFIG{Timeout} * 2,   # Allow two-inflight requests per slot
     );
     DEBUG(sprintf "Spawned an HTTP Pool for %d servers: %d max connections, %d max per host.",
         $num_servers, @CONFIG{qw(MaxConnsTotal MaxConnsPerServer)}
