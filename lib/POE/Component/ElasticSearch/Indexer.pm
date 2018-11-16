@@ -33,7 +33,7 @@ This POE Session is used to index data to an ElasticSearch cluster.
     my $es_session = POE::Component::ElasticSearch::Indexer->spawn(
         Alias            => 'es',                    # Default
         Servers          => [qw(localhost)],         # Default
-        Timeout          => 1,                       # Default
+        Timeout          => 5,                       # Default
         FlushInterval    => 30,                      # Default
         FlushSize        => 1_000,                   # Default
         LoggingConfig    => undef,                   # Default
