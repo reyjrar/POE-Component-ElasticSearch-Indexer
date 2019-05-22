@@ -1,5 +1,5 @@
 #!perl
-# PODNAME: files-to-elasticsearch.pl
+# PODNAME: file-to-elasticsearch.pl
 # ABSTRACT: A simple utility to tail a file and index each line as a document in ElasticSearch
 use strict;
 use warnings;
