@@ -273,7 +273,27 @@ sub got_new_line {
                     }
                 }
                 elsif( $extract->{by} eq 'regex' ) {
-                    # TODO: Regex Decoder
+                    # Skip unless it's valid
+                    next unless $extract->{regex} and $extract->{regex_parts};
+
+                    if( my @parts = ($from =~ /$extract->{regex}/) ) {
+                        # Name parts
+                        my $keys = $extract->{regex_parts};
+                        for( my $i = 0; $i < @parts; $i++ ) {
+                            next unless $keys->[$i] and length $keys->[$i] and $parts[$i];
+                            next if lc $keys->[$i] eq 'null' or lc $keys->[$i] eq 'undef';
+                            if( my $into = $extract->{into} ) {
+                                # Make sure we have a hash reference
+                                $doc ||=  {};
+                                $doc->{$into} = {} unless is_hashref($doc->{$into});
+                                $doc->{$into}{$keys->[$i]} = $parts[$i];
+                            }
+                            else {
+                                $doc ||=  {};
+                                $doc->{$keys->[$i]} = $parts[$i];
+                            }
+                        }
+                    }
                 }
             }
         }
