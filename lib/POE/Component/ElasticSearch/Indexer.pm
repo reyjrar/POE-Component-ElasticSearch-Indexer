@@ -224,7 +224,6 @@ This event only fires when there are batches on disk.
 =cut
 
 sub spawn {
-    my $type = shift;
     my %params = @_;
 
     # Setup Logging
@@ -419,7 +418,7 @@ sub _stats {
             1;
         } or do {
             my $err = $@;
-            ERROR("Disabling the StatsHandler due to fatal error: $!");
+            ERROR("Disabling the StatsHandler due to fatal error: $err");
             $heap->{stats}{StatsHandler} = undef;
         };
     }
@@ -478,9 +477,7 @@ sub es_version {
 
 sub resp_version {
     my ($kernel,$heap,$params,$resp) = @_[KERNEL,HEAP,ARG0,ARG1];
-
-    my $req  = $params->[0];  # HTTP::Request Object
-    my $r    = $resp->[0];    # HTTP::Response Object
+    my $r = $resp->[0];    # HTTP::Response Object
 
     # We might need to batch things
     TRACE(sprintf "es_version() - %s", $r->status_line);
