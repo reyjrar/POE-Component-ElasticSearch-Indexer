@@ -261,6 +261,7 @@ sub spawn {
         MaxRecoveryBatches => 10,
         MaxFailedRatio     => 0.8,
         AuthUsername       => $ENV{USER},
+        Protocol           => 'http',
         %params,
     );
     if( $CONFIG{BatchDiskSpace} ) {
@@ -410,8 +411,6 @@ sub _stats {
                           && $ratio < $heap->{cfg}{MaxFailedRatio};
     }
 
-
-
     # Display our stats
     if( is_coderef($heap->{cfg}{StatsHandler}) ) {
         # Run in an eval and remove the handler if the code dies
@@ -484,7 +483,7 @@ sub resp_version {
     my $r    = $resp->[0];    # HTTP::Response Object
 
     # We might need to batch things
-    TRACE(sprintf "es_version() %s", $r->status_line);
+    TRACE(sprintf "es_version() - %s", $r->status_line);
 
     if( $r->is_success ) {
         my $details;
@@ -495,14 +494,20 @@ sub resp_version {
             WARN("es_version() not valid JSON: $error");
         };
         if( defined $details && ref $details eq 'HASH' ) {
-            DEBUG(sprintf "es_version() instance=%s cluster=%s version=%s",
+            my $v = $details->{version};
+            DEBUG(sprintf "es_version(%s) instance=%s cluster=%s version=%s min=%s",
+                $v->{distribution},
                 $details->{name},
                 $details->{cluster_name},
-                $details->{version}{number},
+                $v->{number},
+                $v->{minimum_wire_compatibility_version},
             );
-            $heap->{es_version} = version->parse($details->{version}{number});
+            $heap->{es_version} = version->parse($v->{minimum_wire_compatibility_version});
             $heap->{es_ready} = 1;
         }
+    }
+    else {
+        ERROR(sprintf "es_version() FAILED: %s", $r->status_line);
     }
     # Retry
     $kernel->yield('version') unless $heap->{es_ready};
@@ -728,6 +733,7 @@ sub es_backlog {
     $kernel->yield( batch => $_ ) for @ids[0..$max_batches-1];
 
     if(@ids > $max_batches) {
+        INFO("Rescheduling backlog run");
         $kernel->delay( backlog => $heap->{cfg}{BacklogInterval}) unless $heap->{SHUTDOWN};
         $heap->{backlog_scheduled} = 1;
     }
@@ -757,9 +763,11 @@ sub es_batch {
 
     # Only process if we're ready
     if( !$heap->{es_ready} ) {
+        WARN("es_batch() - Connection not ready");
         # Flush this batch to disk
         $kernel->yield( save => $id )
             if exists $heap->{batch}{$id};
+
 
         # Bail and rely on the disk backlog
         return;
@@ -881,6 +889,9 @@ sub resp_bulk {
         delete $heap->{batch}{$id} if exists $heap->{batch}{$id};
     }
     elsif( !$batch_file->is_file ) {
+        WARN(sprintf "bulk_resp(%s) FAILED in %0.3fs: %s",
+            $id, $duration, $r->status_line,
+        );
         # Reload the batch into the heap
         $heap->{batch}{$id} = $req->content;
         # Write batch to disk
