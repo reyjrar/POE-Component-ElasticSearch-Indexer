@@ -493,7 +493,7 @@ sub resp_version {
         if( defined $details && ref $details eq 'HASH' ) {
             my $v = $details->{version};
             DEBUG(sprintf "es_version(%s) instance=%s cluster=%s version=%s min=%s",
-                $v->{distribution},
+                $v->{distribution} || 'native',
                 $details->{name},
                 $details->{cluster_name},
                 $v->{number},
